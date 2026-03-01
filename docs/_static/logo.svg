@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="400"
+   height="400"
+   viewBox="0 0 400 400"
+   version="1.1"
+   id="svg20"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs2" />
+  <!-- Background -->
+  <!-- Terminal window -->
+  <rect
+     x="44.688011"
+     y="202.77573"
+     width="276"
+     height="168"
+     rx="13"
+     fill="#0a1422"
+     stroke="#4facfe"
+     stroke-width="2.5"
+     id="rect3" />
+  <rect
+     x="44.688011"
+     y="202.77573"
+     width="276"
+     height="27"
+     rx="13"
+     fill="#4facfe"
+     fill-opacity="0.13"
+     id="rect4" />
+  <rect
+     x="44.688011"
+     y="216.77573"
+     width="276"
+     height="13"
+     fill="#4facfe"
+     fill-opacity="0.13"
+     id="rect5" />
+  <circle
+     cx="65.688011"
+     cy="215.77573"
+     r="5.5"
+     fill="#ff5f57"
+     id="circle5" />
+  <circle
+     cx="82.688011"
+     cy="215.77573"
+     r="5.5"
+     fill="#febc2e"
+     id="circle6" />
+  <circle
+     cx="99.688011"
+     cy="215.77573"
+     r="5.5"
+     fill="#28c840"
+     id="circle7" />
+  <!-- WiFi in title bar -->
+  <!-- Terminal content -->
+  <text
+     x="62.688011"
+     y="257.77573"
+     font-family="ui-monospace, monospace"
+     font-size="13px"
+     fill="#4facfe"
+     opacity="0.9"
+     id="text8">$ python -m rmote</text>
+  <rect
+     x="62.688011"
+     y="270.77573"
+     width="148"
+     height="7"
+     rx="3"
+     fill="#4facfe"
+     opacity="0.18"
+     id="rect8" />
+  <rect
+     x="62.688011"
+     y="285.77573"
+     width="118"
+     height="7"
+     rx="3"
+     fill="#4facfe"
+     opacity="0.14"
+     id="rect9" />
+  <rect
+     x="62.688011"
+     y="300.77573"
+     width="132"
+     height="7"
+     rx="3"
+     fill="#4facfe"
+     opacity="0.16"
+     id="rect10" />
+  <rect
+     x="62.688011"
+     y="320.77573"
+     width="10"
+     height="14"
+     rx="2"
+     fill="#4facfe"
+     opacity="0.88"
+     id="rect11" />
+  <!-- Brain slug sitting on top of terminal, rotated ~12° -->
+  <g
+     transform="matrix(0.48481919,0.18801689,-0.18801689,0.48481919,159.08182,-5.1541623)"
+     id="g20">
+    <!-- Antennae -->
+    <!-- Body -->
+    <!-- Eye outer ring -->
+    <!-- Iris -->
+    <!-- Pupil -->
+    <!-- Shine -->
+    <!-- Texture marks -->
+    <g
+       id="g21"
+       transform="matrix(1.3450438,0,0,1.3450438,-143.06956,-87.805523)">
+      <path
+         d="m 321.37923,115.78161 c -8,-24.000001 4,-46.000001 -13,-66.000001 -7,-10 -17,-14 -13,-24"
+         stroke="#060c20"
+         stroke-width="13"
+         fill="none"
+         stroke-linecap="round"
+         id="path11" />
+      <path
+         d="m 385.37923,115.78161 c 12,-26.000001 0,-48.000001 20,-68.000001 8,-10 18,-14 13,-24"
+         stroke="#060c20"
+         stroke-width="13"
+         fill="none"
+         stroke-linecap="round"
+         id="path12" />
+      <path
+         d="m 353.37923,101.78161 c 42,0 94,34 96,90 2,50 4,84 16,120 7,20 -2,36 -26,39 -26,3 -56,-2 -86,-2 -30,0 -60,5 -86,2 -24,-3 -33,-19 -26,-39 12,-36 14,-70 16,-120 2,-56 54,-90 96,-90 z"
+         fill="#6aaaf8"
+         stroke="#060c20"
+         stroke-width="13"
+         stroke-linejoin="round"
+         id="path13"
+         style="stroke:#060c20;stroke-width:5.64322;stroke-dasharray:none;stroke-opacity:1" />
+      <circle
+         cx="353.37924"
+         cy="221.78162"
+         r="72"
+         fill="#060c20"
+         id="circle13" />
+      <circle
+         cx="353.37924"
+         cy="221.78162"
+         r="59"
+         fill="#a8d8ff"
+         id="circle14" />
+      <circle
+         cx="356.37924"
+         cy="225.78162"
+         r="34"
+         fill="#060c20"
+         id="circle15" />
+      <circle
+         cx="335.37924"
+         cy="203.78162"
+         r="14"
+         fill="#ffffff"
+         opacity="0.9"
+         id="circle16" />
+      <circle
+         cx="373.37924"
+         cy="236.78162"
+         r="7"
+         fill="#ffffff"
+         opacity="0.45"
+         id="circle17" />
+      <g
+         stroke="#060c20"
+         stroke-width="8"
+         stroke-linecap="round"
+         id="g19"
+         transform="translate(153.37923,3.7816087)">
+        <line
+           x1="255"
+           y1="299"
+           x2="274"
+           y2="313"
+           id="line17" />
+        <line
+           x1="267"
+           y1="290"
+           x2="284"
+           y2="305"
+           id="line18" />
+        <line
+           x1="243"
+           y1="307"
+           x2="261"
+           y2="321"
+           id="line19" />
+      </g>
+    </g>
+  </g>
+</svg>

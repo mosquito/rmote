@@ -1,0 +1,51 @@
+- case: call_tool_basic
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def add(a: int, b: int) -> int:
+            return a + b
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.add, 10, 20)
+        reveal_type(result)  # N: Revealed type is "builtins.int"
+
+- case: call_tool_string_return
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def greet(name: str) -> str:
+            return f"Hello, {name}"
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.greet, "World")
+        reveal_type(result)  # N: Revealed type is "builtins.str"
+
+- case: call_tool_kwargs
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def concat(s1: str, s2: str) -> str:
+            return s1 + s2
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.concat, s1="hello", s2="world")
+        reveal_type(result)  # N: Revealed type is "builtins.str"
+
+- case: call_tool_async_method
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class AsyncTool(Tool):
+        @staticmethod
+        async def async_add(a: int, b: int) -> int:
+            return a + b
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(AsyncTool.async_add, 5, 10)
+        reveal_type(result)  # N: Revealed type is "builtins.int"

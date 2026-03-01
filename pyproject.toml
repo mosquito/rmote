@@ -1,0 +1,90 @@
+[project]
+name = "rmote"
+version = "0.2.0"
+description = "Control any remote host. No agent. No install. Just a bare interpreter."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Systems Administration",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+    "Operating System :: POSIX",
+    "License :: OSI Approved :: Apache Software License",
+]
+license = { file = "LICENSE" }
+
+[build-system]
+requires = ["uv_build>=0.10.2,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rmote"
+module-root = ""
+
+[dependency-groups]
+docs = [
+    "sphinx>=8",
+    "furo",
+    "sphinx-autodoc-typehints",
+    "myst-parser",
+    "sphinxcontrib-mermaid",
+    "sphinx-copybutton",
+]
+dev = [
+    "markdown-pytest>=0.5.3",
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "pytest-mypy-plugins>=3.2.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.15.1",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "docs", "README.md"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 119
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

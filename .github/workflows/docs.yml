@@ -1,0 +1,55 @@
+name: docs
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --group docs
+
+      - name: Build HTML documentation
+        run: uv run make -C docs html
+        env:
+          FORCE_COLOR: 1
+
+      - name: Upload HTML documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: docs/_build/html
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    container: rclone/rclone:latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    env:
+      RCLONE_CONFIG_S3_TYPE: s3
+      RCLONE_CONFIG_S3_PROVIDER: ${{ secrets.AWS_S3_PROVIDER }}
+      RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_S3_ENDPOINT: ${{ secrets.AWS_S3_ENDPOINT_URL }}
+      RCLONE_CONFIG_S3_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Download documentation artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: docs/_build/html
+
+      - name: Publish to S3
+        run: |
+          rclone sync docs/_build/html/ "s3:${{ secrets.AWS_S3_BUCKET }}/" \
+            --header-upload "Cache-Control: max-age=3600"
