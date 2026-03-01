@@ -1,6 +1,6 @@
 # rmote
 
-![rmote](docs/_static/logo.svg)
+![rmote](https://raw.githubusercontent.com/mosquito/rmote/master/docs/_static/logo.svg)
 
 **Control any remote host. No agent. No install. Just a bare interpreter.**
 
