@@ -73,9 +73,14 @@ Tools are transferred lazily and cached for the lifetime of the connection:
 4. **Reconstruction** - {func}`~rmote.protocol.tool_from_dict` runs `exec` on the source
    inside a fresh module namespace, then caches the resulting class in `sys.modules`.
 
-5. **Cache** - The local `Protocol` instance maintains a `_tools_cache` set of already-synced
+5. **Registration** - On the remote side, the tool instance is stored in `Protocol.tools` keyed
+   by its **module-qualified name** (`module.ClassName`). Inline tools (defined inside a function)
+   use the bare class name. This means two Tool subclasses with the same class name in different
+   modules are dispatched correctly — they occupy separate keys.
+
+6. **Cache** - The local `Protocol` instance maintains a `_tools_cache` set of already-synced
    tool classes. Before every RPC call, `__call__` checks whether the tool class is in this set.
-   If it is not, steps 2–4 run and the class is added to the set; if it is, the SYNC is skipped
+   If it is not, steps 2–5 run and the class is added to the set; if it is, the SYNC is skipped
    entirely and only the RPC packet is sent.
 
 **Lazy** - No SYNC packets are sent when a connection is opened or when a Tool class is defined.

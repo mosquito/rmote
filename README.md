@@ -530,9 +530,10 @@ that verifies spawning a subprocess inside a tool never corrupts the protocol pi
 - Cross-tool integration: concurrent reads, mixed built-in and custom tools in a single session,
   error propagation through `asyncio.gather`.
 
-**12 reusable `Tool` fixtures** in `tests/tools_cases/` cover the serialization corner cases:
+**14 reusable `Tool` fixtures** in `tests/tools_cases/` cover the serialization corner cases:
 async methods, class-level constants, dataclass and nested-dataclass returns, enums defined
-inside and outside the class, module-level imports, and tool inheritance.
+inside and outside the class, module-level imports, tool inheritance, and same-name tools in
+different modules (name collision safety).
 
 **README and docs examples** — `pytest` treats `README.md` and all files under `docs/` as test
 sources. Every named code block is executed by `markdown-pytest`, so every snippet in this file

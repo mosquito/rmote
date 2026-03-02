@@ -3,6 +3,8 @@ import asyncio
 import pytest
 
 from rmote.protocol import Protocol, Tool, tool_from_dict, tool_to_dict
+from tests.tools_cases.same_name_a import SameNameTool as SameNameToolA
+from tests.tools_cases.same_name_b import SameNameTool as SameNameToolB
 
 
 class SimpleTool(Tool):
@@ -95,3 +97,57 @@ async def test_protocol_concurrent_calls(protocol):
     # Verify all results
     for i, result in enumerate(results):
         assert result == i + (i + 1)
+
+
+@pytest.mark.asyncio
+async def test_same_name_tools(protocol: Protocol) -> None:
+    """Test that tools with the same class name in different modules don't collide"""
+    result_a = await protocol(SameNameToolA.value)
+    assert result_a == "from_a"
+
+    result_b = await protocol(SameNameToolB.value)
+    assert result_b == "from_b"
+
+    # Call both again to verify caching doesn't break things
+    assert await protocol(SameNameToolA.value) == "from_a"
+    assert await protocol(SameNameToolB.value) == "from_b"
+
+
+@pytest.mark.asyncio
+async def test_same_name_inline_tool(protocol: Protocol) -> None:
+    """Test that an inline tool with the same class name as a file-level tool doesn't collide"""
+
+    class SameNameTool(Tool):
+        @staticmethod
+        def value() -> str:
+            return "from_inline"
+
+    # Inline tool uses bare class name key, file-level tools use module-qualified key
+    assert await protocol(SameNameTool.value) == "from_inline"
+    assert await protocol(SameNameToolA.value) == "from_a"
+    assert await protocol(SameNameToolB.value) == "from_b"
+
+    # All three coexist without overwriting each other
+    assert await protocol(SameNameTool.value) == "from_inline"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tools(protocol: Protocol) -> None:
+    """Test dynamically defined inline tools work correctly"""
+
+    class AlphaTool(Tool):
+        @staticmethod
+        def greet(name: str) -> str:
+            return f"hello from alpha, {name}"
+
+    class BetaTool(Tool):
+        @staticmethod
+        def greet(name: str) -> str:
+            return f"hello from beta, {name}"
+
+    assert await protocol(AlphaTool.greet, "world") == "hello from alpha, world"
+    assert await protocol(BetaTool.greet, "world") == "hello from beta, world"
+
+    # Mix with file-level tools in the same session
+    assert await protocol(SameNameToolA.value) == "from_a"
+    assert await protocol(AlphaTool.greet, "again") == "hello from alpha, again"

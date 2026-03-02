@@ -18,6 +18,63 @@ is opened, the class is re-synced on its first call through the new connection.
 5. **Import inside methods** - put `import` statements inside the method body so they
    are executed on the remote interpreter, not the local one.
 
+## Name Collisions
+
+Tools are identified on the remote side by their **module-qualified name** (`module.ClassName`),
+not the bare class name.  Two Tool subclasses with the same class name in different modules work
+correctly — each is stored and dispatched independently.
+
+For example, suppose two modules both define a class called ``Helper``:
+
+<!-- name: test_name_collision -->
+```python
+from rmote.protocol import Tool
+
+
+# In a real project these would live in separate files,
+# e.g. tools/monitoring.py and tools/deploy.py
+
+class MonitoringHelper(Tool):
+    @staticmethod
+    def value() -> str:
+        return "monitoring"
+
+
+class DeployHelper(Tool):
+    @staticmethod
+    def value() -> str:
+        return "deploy"
+```
+
+Both can be used in the same session without conflict:
+
+<!-- name: test_name_collision -->
+```python
+import asyncio
+import sys
+from rmote.protocol import Protocol
+
+
+async def main() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-qui",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    async with await Protocol.from_subprocess(process) as proto:
+        result_m = await proto(MonitoringHelper.value)
+        result_d = await proto(DeployHelper.value)
+        assert result_m == "monitoring"
+        assert result_d == "deploy"
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Inline tools (defined inside a function body) use only the bare class name, so two inline tools
+with the same name in the same session will collide.  This is rarely an issue in practice.
+
 ## Running Subprocesses
 
 The remote Python process communicates with the local side over its own **stdin / stdout** as a

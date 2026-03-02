@@ -584,13 +584,15 @@ class Protocol(BaseProtocol):
 
     def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
         tool_cls = tool_from_dict(tool_definition)
-        self.tools[tool_cls.__name__] = tool_cls()
+        module = tool_definition.get("module")
+        key = f"{module}.{tool_cls.__name__}" if module else tool_cls.__name__
+        self.tools[key] = tool_cls()
         logging.debug("Loaded tool %s", tool_definition)
 
     async def _handle_rpc_request(self, request: RPCRequest, _: int) -> Any:
         if "." not in request["method"]:
             raise ValueError("Invalid method name")
-        tool_name, method_name = request["method"].split(".", 1)
+        tool_name, method_name = request["method"].rsplit(".", 1)
         tool = self.tools.get(tool_name)
         if tool is None:
             raise ValueError(f"Tool {tool_name} not found")
@@ -721,10 +723,14 @@ class Protocol(BaseProtocol):
         if tool_class not in self._tools_cache:
             await self._call(tool_to_dict(tool_class), Flags.SYNC | Flags.REQUEST)
             self._tools_cache.add(tool_class)
-        # Use ClassName.method_name rather than __qualname__ so that inline tools
-        # (whose qualname includes the enclosing scope, e.g. "fn.<locals>.T.m")
-        # are dispatched correctly on the remote side.
-        method_id = f"{tool_class.__name__}.{tool.__name__}"
+        # Use module-qualified name for file-based tools to avoid collisions
+        # when different modules define tools with the same class name.
+        # Inline tools (qualname contains <locals>) use bare class name.
+        if "<locals>" in tool_class.__qualname__:
+            tool_key = tool_class.__name__
+        else:
+            tool_key = f"{tool_class.__module__}.{tool_class.__name__}"
+        method_id = f"{tool_key}.{tool.__name__}"
         result: Any = await self._call(
             RPCRequest(method=method_id, args=args, kwargs=kwargs), Flags.RPC | Flags.REQUEST
         )
