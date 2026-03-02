@@ -1,6 +1,8 @@
 Built-in Tools
 ==============
 
+.. automodule:: rmote.tools
+
 .. toctree::
    :maxdepth: 1
 

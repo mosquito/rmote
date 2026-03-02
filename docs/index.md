@@ -4,6 +4,7 @@
 ![Python 3.11+](https://img.shields.io/pypi/pyversions/rmote?style=flat-square)
 ![remote deps: none](https://img.shields.io/badge/remote_deps-none-brightgreen?style=flat-square)
 ![typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-blue?style=flat-square)
+[![GitHub](https://img.shields.io/badge/GitHub-mosquito%2Frmote-181717?style=flat-square&logo=github)](https://github.com/mosquito/rmote)
 
 **Asyncio RPC for remote Python processes that have nothing installed.**
 
@@ -42,17 +43,17 @@ dataclasses rather than JSON blobs.
 ```{mermaid}
 graph LR
     subgraph local ["Local (your machine)"]
-        hlp["Protocol\n+ _tools_cache"]
-        tc["Tool classes\n(source extracted by ToolMeta)"]
+        hlp["Protocol<br/>+ _tools_cache"]
+        tc["Tool classes<br/>(source extracted by ToolMeta)"]
     end
 
     subgraph remote ["Remote (injected process)"]
-        rp["Protocol\n(asyncio event loop)"]
-        ti["Tool instances\n(exec'd from source)"]
+        rp["Protocol<br/>(asyncio event loop)"]
+        ti["Tool instances<br/>(exec'd from source)"]
     end
 
-    hlp <-->|"stdin / stdout\npackets"| rp
-    tc -.->|"SYNC packet\n(first call only)"| ti
+    hlp <-->|"stdin / stdout<br/>packets"| rp
+    tc -.->|"SYNC packet<br/>(first call only)"| ti
 ```
 
 Full detail is in {doc}`concepts`, but the three-step summary:
@@ -125,7 +126,7 @@ sequenceDiagram
 Install on the local side only - the remote needs nothing:
 
 ```bash
-pip install `rmote`
+pip install rmote
 ```
 
 ## Built-in Tools
@@ -146,14 +147,77 @@ pip install `rmote`
 
 ## Project Status
 
-**Version: 0.3.0** - semver: patch releases fix bugs, minor releases add tools or protocol
+**Version: 0.2.0** — Beta. Semver: patch releases fix bugs, minor releases add tools or protocol
 features, major releases indicate breaking wire or API changes.
 
-**Stable:** core protocol, SSH transport, all 11 built-in tools, templating engine. The entire
-``rmote`/` package is type-checked with strict mypy.
+### Tests
 
-**Not yet supported:** Windows remote hosts, non-SSH transports (socket, docker exec), streaming
-or generator responses, TLS-encrypted channels.
+The project ships an extensive test suite across three layers:
+
+**Protocol layer** (`tests/` — 7 files):
+
+- `test_protocol.py` — tool serialization round-trips, sync and async RPC calls, response
+  matching by `packet_id`.
+- `test_protocol_advanced.py` — concurrent in-flight requests, multi-tool sessions, tool
+  inheritance.
+- `test_protocol_errors.py` — remote exception propagation, original exception type preservation,
+  tracebacks.
+- `test_protocol_lowlevel.py` — raw packet encoding/decoding, LZMA compression threshold, flags
+  bitmask, header magic.
+- `test_stdio_protection.py` — verifies that spawning a subprocess inside a tool never touches
+  the protocol pipes.
+- `test_template.py` — template variable interpolation, control flow, `%%` / `##` / `\${`
+  escapes, `render_template` helper.
+- `test_tool_metaclass.py` — `ToolMeta` AST import extraction, class variable collection,
+  `__init__` prohibition.
+
+**Tool layer** (`tests/tools/` — 11 files, all run against live processes):
+
+- `test_fs.py` — `FileSystem` unit tests (local) plus remote round-trips via the `protocol`
+  fixture.
+- `test_exec.py`, `test_logger.py`, `test_service.py`, `test_user.py` — built-in tools exercised
+  against a local subprocess.
+- `test_apt.py`, `test_apt_repository.py` — `Apt` and `AptRepository` tested inside a
+  `python:3-slim` Docker container (install, remove, idempotency, TTL-aware update).
+- `test_pacman.py`, `test_pacman_repository.py` — `Pacman` and `PacmanRepository` tested inside
+  a locally-built `archlinux:python` Docker image.
+- `test_template.py` — `Template` tool end-to-end over the RPC channel.
+- `test_integration.py` — cross-tool interactions: concurrent `FileSystem` reads, mixed
+  built-in + custom tool calls in a single session, error propagation through `asyncio.gather`.
+
+**Tool fixtures** (`tests/tools_cases/` — 12 Tool subclass definitions):
+
+Reusable fixtures shared across test files, each targeting a specific serialization or type
+scenario: async methods, class-level constants, dataclass returns, nested dataclasses, enums
+defined inside and outside the class, JSON-serializable types, math operations, module-level
+imports, tool inheritance, user-lookup patterns.
+
+**Documentation examples** — `pytest` discovers `README.md` and all files under `docs/` as test
+sources. Every named code block is executed by `markdown-pytest` so all published snippets are
+verified on each commit.
+
+### Docker transport
+
+The test suite already connects to Python interpreters running inside Docker containers using the
+existing `from_subprocess` transport — `docker run --rm -i <image> python3 -qui` is just another
+subprocess whose stdin/stdout carry the protocol. A dedicated `Protocol.from_docker` convenience
+method is a natural next step.
+
+### Type Safety
+
+The entire `rmote/` package is type-checked under strict mypy. All public APIs carry full type
+annotations and return values from RPC calls are typed dataclasses. Supported and tested on
+Python 3.11, 3.12, 3.13, and 3.14.
+
+### What is stable
+
+Core protocol, SSH transport, subprocess transport, all 11 built-in tools, templating engine,
+concurrent multi-host fan-out, Docker-based testing infrastructure.
+
+### Not yet supported
+
+Windows remote hosts, raw socket / TLS transports, `Protocol.from_docker` public API, streaming
+or generator responses.
 
 ```{toctree}
 :maxdepth: 2

@@ -230,7 +230,7 @@ verbose SSH diagnostics.
 A custom type returned from a Tool method (e.g. a dataclass) must be defined *outside* the
 Tool class body and importable in both the local and remote namespaces.  If it is defined
 inside the tool source it will exist remotely but not locally, so unpickling will fail.
-See {ref}`Returning Custom Types <writing-tools:returning custom types>` for the correct pattern.
+See {ref}`Returning Custom Types <returning-custom-types>` for the correct pattern.
 
 Two distinct tool classes appear in the gather above - `FileSystem` and `MyTool`. Each is synced
 exactly once, on its first call through this connection. The three `FileSystem` calls share a

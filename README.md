@@ -501,6 +501,60 @@ All built-in tools use only the Python stdlib on the remote side.
 | **RPyC zero-deploy** | Python + Plumbum locally |    partial    | Transparent object proxies                       |
 | **rmote**            | Python stdlib only       |    **yes**    | Compressed bootstrap, asyncio RPC, typed returns |
 
-rmote is closest in spirit to Mitogen — same stdin-injection technique — but is built for asyncio from the ground up. 
+rmote is closest in spirit to Mitogen — same stdin-injection technique — but is built for asyncio from the ground up.
 Concurrent multi-host calls are first-class, tools are plain Python classes, and return values are typed dataclasses
 rather than JSON blobs.
+
+## Project Status
+
+**Beta — version 0.2.0.** Semver: patch = bug fix, minor = new tool or protocol feature,
+major = breaking wire or API change.
+
+### Tests
+
+The test suite covers three layers:
+
+**Protocol** (7 test files) — tool serialization, sync and async RPC round-trips, concurrent
+in-flight requests matched by `packet_id`, remote exception propagation with original type
+preservation, raw packet encoding/decoding, LZMA compression threshold, and a dedicated test
+that verifies spawning a subprocess inside a tool never corrupts the protocol pipes.
+
+**Tools** (11 test files, all run against live processes):
+
+- `FileSystem`, `Exec`, `Logger`, `Service`, `User`, `Template` — tested against a local
+  subprocess.
+- `Apt` and `AptRepository` — tested inside a `python:3-slim` Docker container: install,
+  remove, idempotency checks, TTL-aware `update`.
+- `Pacman` and `PacmanRepository` — tested inside a locally-built `archlinux:python` Docker
+  image.
+- Cross-tool integration: concurrent reads, mixed built-in and custom tools in a single session,
+  error propagation through `asyncio.gather`.
+
+**12 reusable `Tool` fixtures** in `tests/tools_cases/` cover the serialization corner cases:
+async methods, class-level constants, dataclass and nested-dataclass returns, enums defined
+inside and outside the class, module-level imports, and tool inheritance.
+
+**README and docs examples** — `pytest` treats `README.md` and all files under `docs/` as test
+sources. Every named code block is executed by `markdown-pytest`, so every snippet in this file
+is verified on each commit.
+
+### Docker transport
+
+The test suite already runs Python interpreters inside Docker containers using `from_subprocess`
+(`docker run --rm -i <image> python3 -qui` is just another subprocess). A dedicated
+`Protocol.from_docker` convenience method is a natural next step.
+
+### Type Safety
+
+The entire `rmote/` package passes strict mypy with no errors. All public APIs are fully
+annotated. Tested on Python 3.11, 3.12, 3.13, and 3.14.
+
+### Stable
+
+Core protocol, SSH transport, subprocess transport, all 11 built-in tools, templating engine,
+concurrent multi-host fan-out, Docker-based test infrastructure.
+
+### Not yet supported
+
+Windows remote hosts, raw socket / TLS transports, `Protocol.from_docker` public API, streaming
+or generator responses.

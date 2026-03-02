@@ -24,6 +24,12 @@ classifiers = [
 ]
 license = { file = "LICENSE" }
 
+[project.urls]
+Homepage = "https://github.com/mosquito/rmote"
+Repository = "https://github.com/mosquito/rmote"
+Documentation = "https://rmote.readthedocs.io"
+"Bug Tracker" = "https://github.com/mosquito/rmote/issues"
+
 [build-system]
 requires = ["uv_build>=0.10.2,<0.11.0"]
 build-backend = "uv_build"

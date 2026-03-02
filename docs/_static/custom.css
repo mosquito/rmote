@@ -1,0 +1,4 @@
+/* Prevent shields.io badges from dancing due to baseline vertical alignment */
+img[src*="shields.io"] {
+    vertical-align: middle;
+}

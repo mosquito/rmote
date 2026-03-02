@@ -137,6 +137,7 @@ class Config(Tool):
         return cls.base_url + path
 ```
 
+(returning-custom-types)=
 ## Returning Custom Types
 
 Any picklable object can be returned - including dataclasses:

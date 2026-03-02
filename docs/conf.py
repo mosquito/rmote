@@ -20,6 +20,12 @@ html_theme = "furo"
 html_title = "rmote"
 html_logo = "_static/logo.svg"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
+html_theme_options = {
+    "source_repository": "https://github.com/mosquito/rmote",
+    "source_branch": "master",
+    "source_directory": "docs/",
+}
 
 autodoc_default_options = {
     "members": True,
@@ -38,3 +44,5 @@ intersphinx_mapping = {
 
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
+
+viewcode_follow_imported_members = True
