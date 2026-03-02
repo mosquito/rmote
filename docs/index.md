@@ -24,19 +24,24 @@ dataclasses, and multiple in-flight calls execute concurrently on both sides.
 
 ## Prior Art
 
-| Tool                 | Remote requires          | Execution model                   | Native async |
-|----------------------|--------------------------|-----------------------------------|--------------|
-| **Fabric**           | SSH + shell              | Shell commands only               | No           |
-| **Ansible**          | Python 2.6+ + modules    | Module push (JSON results)        | No           |
-| **RPyC zero-deploy** | Python + Plumbum locally | True RPC, transparent proxies     | Partial      |
-| **Mitogen**          | Python only              | Compressed bootstrap, RPC         | No           |
-| **rmote**            | Python stdlib only       | Compressed bootstrap, asyncio RPC | Yes          |
+| Tool                 | Remote requires          | Execution model                   | Native async | Connection  |
+|----------------------|--------------------------|-----------------------------------|--------------|-------------|
+| **Fabric**           | SSH + shell              | Shell commands only               | No           | per-call    |
+| **Ansible**          | Python 2.6+ + modules    | Module push (JSON results)        | No           | per-run     |
+| **RPyC zero-deploy** | Python + Plumbum locally | True RPC, transparent proxies     | Partial      | persistent  |
+| **Mitogen**          | Python only              | Compressed bootstrap, RPC         | No           | per-run     |
+| **rmote**            | Python stdlib only       | Compressed bootstrap, asyncio RPC | Yes          | persistent  |
 
 The closest in spirit is **Mitogen** - it uses the same stdin-injection technique. However,
 Mitogen predates Python 3's async model, is no longer actively maintained, and exposes a
 lower-level channel API. `rmote` is built for asyncio from the ground up: concurrent multi-host
 calls are first-class, tool definitions are plain Python classes, and return values are typed
 dataclasses rather than JSON blobs.
+
+Because `Protocol` is an ordinary async context manager, nothing prevents it from staying open
+for hours or days. Bootstrap pays its cost once; every subsequent call travels over the
+already-warmed channel. This makes long-running daemons a natural fit — see
+{ref}`persistent-daemon` for a worked example.
 
 ## How It Works
 

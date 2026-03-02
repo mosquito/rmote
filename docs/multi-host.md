@@ -275,3 +275,56 @@ sequenceDiagram
         W3-->>L: [...]
     end
 ```
+
+(persistent-daemon)=
+## Persistent configuration daemon
+
+Tools like Ansible open connections, push their modules, and exit. Every run pays the
+bootstrap cost again — SSH handshake, Python startup, module transfer. Running Ansible every
+30 seconds on 50 hosts means thousands of short-lived SSH connections per day.
+
+With `rmote` the `Protocol` is just an object; you decide when to close it. Bootstrap happens
+once. Every subsequent RPC call travels over the already-open channel at the cost of a single
+round-trip packet. This makes it trivial to write a long-running daemon that continuously
+enforces configuration state:
+
+<!-- name: test_config_daemon -->
+```python
+import asyncio
+from contextlib import AsyncExitStack
+from rmote.protocol import Protocol
+from rmote.tools import FileSystem
+
+HOSTS = ["web1", "web2", "web3"]
+WANTED = "PasswordAuthentication no\nPermitRootLogin no\n"
+CONFIG = "/etc/ssh/sshd_config.d/hardening.conf"
+
+
+async def enforce(proto: Protocol, host: str) -> None:
+    try:
+        current = await proto(FileSystem.read_str, CONFIG)
+    except FileNotFoundError:
+        current = ""
+    if current != WANTED:
+        await proto(FileSystem.write, CONFIG, WANTED)
+        print(f"{host}: drift corrected")
+
+
+async def daemon() -> None:
+    async with AsyncExitStack() as stack:
+        protos = await asyncio.gather(*[
+            stack.enter_async_context(await Protocol.from_ssh(h))
+            for h in HOSTS
+        ])
+        while True:
+            await asyncio.gather(*[enforce(p, h) for p, h in zip(protos, HOSTS)])
+            await asyncio.sleep(30)
+
+
+if __name__ == "__main__":
+    asyncio.run(daemon())
+```
+
+The `while True` loop runs forever on the already-open connections. Thirty seconds of idle
+time costs nothing — the remote Python process simply blocks waiting for the next packet.
+There is no reconnect, no re-bootstrap, no re-sync.
