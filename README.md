@@ -2,6 +2,12 @@
 
 ![rmote](https://raw.githubusercontent.com/mosquito/rmote/master/docs/_static/logo.svg)
 
+[![PyPI Version](https://img.shields.io/pypi/v/rmote.svg)](https://pypi.org/project/rmote/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/rmote.svg)](https://pypi.org/project/rmote/)
+[![Tests](https://github.com/mosquito/rmote/actions/workflows/tests.yml/badge.svg)](https://github.com/mosquito/rmote/actions/workflows/tests.yml)
+[![Docs](https://readthedocs.org/projects/rmote/badge/?version=latest)](https://rmote.readthedocs.io)
+[![License](https://img.shields.io/pypi/l/rmote.svg)](https://github.com/mosquito/rmote/blob/master/LICENSE)
+
 **Control any remote host. No agent. No install. Just a bare interpreter.**
 
 ---
