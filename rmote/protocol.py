@@ -390,8 +390,15 @@ class BaseProtocol:
                 payload = await asyncio.to_thread(compress, payload)
                 flags |= Flags.COMPRESSED
             header = self.PACKET_HEADER.pack(self.MAGIC, flags, len(payload), packet_id)
-            self.writer.write(header + payload)
-            await self.writer.drain()
+            if self.writer.is_closing():
+                raise ConnectionError("Connection closed")
+            try:
+                self.writer.write(header + payload)
+                await self.writer.drain()
+            except BaseException:
+                # The peer may have received only part of the packet.
+                self.writer.close()
+                raise
 
     async def write_boundary(self) -> None:
         async with self.write_lock:
@@ -532,6 +539,7 @@ class Protocol(BaseProtocol):
         self._tools_cache = set()
         self._loop_task: asyncio.Task[None] | None = None
         self._closed = asyncio.Event()
+        self._close_error: Exception | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
         self.tools: dict[str, Tool] = dict()
 
@@ -562,13 +570,15 @@ class Protocol(BaseProtocol):
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self._closed.set()
+        self._finish_pending(ConnectionError("Connection closed"))
+        tasks = list(self._tasks)
         if self._loop_task:
             self._loop_task.cancel()
-            for task in self._tasks:
-                task.cancel()
-            await asyncio.gather(self._loop_task, *self._tasks, return_exceptions=True)
-            self._loop_task = None
+            tasks.append(self._loop_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._loop_task = None
         self.writer.close()
         try:
             await self.writer.wait_closed()
@@ -612,14 +622,16 @@ class Protocol(BaseProtocol):
             logging.warning("RPC response %r packet not found in futures", packet_id)
             return
         future = self.futures.pop(packet_id)
-        future.set_result(response)
+        if not future.done():
+            future.set_result(response)
 
     async def _handle_exception(self, exception: Exception, packet_id: int) -> None:
         if packet_id not in self.futures:
             logging.warning("Exception response %r packet not found in futures: %s", packet_id, exception)
             return
         future = self.futures.pop(packet_id)
-        future.set_exception(exception)
+        if not future.done():
+            future.set_exception(exception)
 
     @staticmethod
     async def _handle_log(record: LogRecord, _: int) -> None:
@@ -664,6 +676,15 @@ class Protocol(BaseProtocol):
     async def wait_closed(self) -> None:
         await self._closed.wait()
 
+    def _finish_pending(self, error: Exception) -> None:
+        if self._close_error is None:
+            self._close_error = error
+        self._closed.set()
+        for future in self.futures.values():
+            if not future.done():
+                future.set_exception(self._close_error)
+        self.futures.clear()
+
     async def _loop(self) -> None:
         error: Exception | None = None
         try:
@@ -692,20 +713,31 @@ class Protocol(BaseProtocol):
         except Exception as e:
             error = e
         finally:
-            self._closed.set()
-            exc = error or ConnectionError("Remote process closed the connection")
-            for future in self.futures.values():
-                if not future.done():
-                    future.set_exception(exc)
-            self.futures.clear()
+            self._finish_pending(error or ConnectionError("Remote process closed the connection"))
 
     async def _call(self, payload: Any, flags: Flags) -> Any:
+        if self._closed.is_set():
+            raise self._close_error or ConnectionError("Connection closed")
         logging.debug("Call %r %s", flags, payload)
         packet_id = self.get_id()
         future = self.loop.create_future()
         self.futures[packet_id] = future
-        await self.send(payload, flags, packet_id)
-        return await future
+        try:
+            await self.send(payload, flags, packet_id)
+            return await future
+        except BaseException as error:
+            if self.writer.is_closing():
+                self._finish_pending(
+                    error if isinstance(error, Exception) else ConnectionError("Packet send interrupted")
+                )
+            raise
+        finally:
+            self.futures.pop(packet_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # A receive/close error can arrive while send is still pending.
+                future.exception()
 
     @overload
     async def __call__(self, tool: Callable[P, Coroutine[Any, Any, R]], *args: P.args, **kwargs: P.kwargs) -> R: ...
