@@ -226,6 +226,8 @@ def process(
 
     Tools must be use only this function for execute subprocesses,
     to avoid conflicts with protocol communication.
+
+    String stdin is encoded in binary mode. Text mode requires string stdin.
     """
     logging.debug("Executing subprocess: %r", cmd_and_args)
 
@@ -240,7 +242,9 @@ def process(
     }
 
     if stdin is not None:
-        if isinstance(stdin, str):
+        if text and isinstance(stdin, bytes):
+            raise TypeError("stdin must be str when text=True")
+        if isinstance(stdin, str) and not text:
             stdin = stdin.encode()
         # Use input= (not stdin=) so subprocess uses PIPE internally;
         # remove stdin=DEVNULL to avoid the "stdin and input may not both be used" error.
