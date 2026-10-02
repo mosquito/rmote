@@ -746,6 +746,9 @@ class Protocol(BaseProtocol):
     async def __call__(self, tool: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R: ...
 
     async def __call__(self, tool: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return await self._call_tool(tool, *args, **kwargs)
+
+    async def _call_tool(self, tool: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         tool_class = getattr(tool, "__tool_class__", None)
         # For classmethods/staticmethods, check __func__ if __tool_class__ not found on the method itself
         if tool_class is None and hasattr(tool, "__func__"):
