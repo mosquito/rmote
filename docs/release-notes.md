@@ -1,6 +1,14 @@
 # Release notes
 
-## 0.4.0 (unreleased)
+## 0.4.1 — 2026-10-02
+
+Documentation links in the README and package metadata now point to
+[docs.rmote.org](https://docs.rmote.org). The README documentation badge now
+shows the status of the documentation build.
+
+[Full changelog](https://github.com/mosquito/rmote/compare/0.4.0...0.4.1).
+
+## 0.4.0 — 2026-10-02
 
 This release adds a synchronous client over the existing asynchronous protocol.
 The asynchronous API remains available. Both clients support synchronous and
