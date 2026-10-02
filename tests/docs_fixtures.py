@@ -42,6 +42,8 @@ def docs_ssh(
     options = [
         "-o",
         "BatchMode=yes",
+        "-S",
+        "none",
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
@@ -61,7 +63,7 @@ def docs_ssh(
             port=port,
             identity=key,
             python=sys.executable,
-            ssh_options=options,
+            ssh_options=options + (["-o", "ProxyCommand=false"] if host == "unreachable.example" else []),
             **kwargs,
         )
 
@@ -74,7 +76,7 @@ def docs_ssh(
             port=port,
             identity=key,
             python=sys.executable,
-            ssh_options=options,
+            ssh_options=options + (["-o", "ProxyCommand=false"] if host == "unreachable.example" else []),
             **kwargs,
         )
 
