@@ -11,23 +11,12 @@ from markdown_pytest import parse_code_blocks  # type: ignore[import-untyped]
 
 
 @pytest.fixture
-def inventory_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
-    document = Path(__file__).with_name("writing-tools.md")
-    source = "\n".join(
-        line
-        for block in parse_code_blocks(str(document))
-        if block.name == "test_inventory_module"
-        for line in block.lines
-    )
-    assert source, "The documented inventory module must exist"
-    path = tmp_path / "inventory.py"
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("inventory", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "inventory", module)
-    spec.loader.exec_module(module)
-    yield module
+def tool_examples(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    directory = Path(__file__).resolve().parents[1] / "examples" / "tools"
+    monkeypatch.syspath_prepend(str(directory))
+    yield
+    for path in directory.glob("*.py"):
+        sys.modules.pop(path.stem, None)
 
 
 @pytest.fixture(name="__name__")
