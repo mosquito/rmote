@@ -1,101 +1,79 @@
 # Quickstart
 
-## Installation
+Use rmote to install and configure software on another machine from Python.
+Start by creating an administrator account, installing its SSH key, and granting
+sudo access. Then deploy a Redis cache: install its package, render a systemd
+service, start it, and check the result.
+
+For convenience, Docker supplies the target machine. The same deployment works
+over SSH: only the connector changes. You install rmote locally; the target
+needs Python, but does not need rmote or an agent.
+
+## Install rmote
+
+Use Python 3.11 or newer on your local machine:
 
 ```bash
-pip install rmote
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install rmote
 ```
 
-The local side requires Python 3.11 or newer. The remote interpreter needs only
-its standard library. Install rmote on the local side.
+Keep this environment active when you run the Python examples below.
 
-## Choose a Client
+## Prepare a Disposable Host
 
-| Client | Import | Connect | Call | Close |
-|---|---|---|---|---|
-| Synchronous | `from rmote.sync import Connection` | `Connection.from_local()` or `Connection.from_ssh(...)` | `remote(Tool.method, ...)` | `with remote` or `remote.close()` |
-| Asynchronous | `from rmote.protocol import Protocol` | `await Protocol.from_subprocess(process)` or `await Protocol.from_ssh(...)` | `await remote(Tool.method, ...)` | `async with remote` |
+The example needs a Debian or Ubuntu host with Python and systemd.
+We will create one in Docker so you can try package installation and service
+management without changing your own machine.
 
-Both clients can call `def` and `async def` Tool methods. The client interface
-controls how your local code waits. It does not change remote execution.
-The {doc}`writing-tools` guide explains tool modules, inline tools, and return types.
+Save this as `Dockerfile` in a new directory:
 
-## Local Subprocess
+```{literalinclude} ../examples/quickstart/Dockerfile
+:language: dockerfile
+```
 
-These examples share a tool module. Save it as `lifecycle_tools.py` beside the
-client scripts. Keep connections and local setup in the client scripts because
-rmote transfers the tool module to the remote interpreter.
+Build the image and start the container:
 
-<!-- name: test_lifecycle_tool_module -->
+```bash
+docker build -t rmote-quickstart .
+docker run -d --rm --name rmote-quickstart \
+    --privileged --cgroupns=private \
+    --tmpfs /run --tmpfs /run/lock \
+    rmote-quickstart
+```
+
+Here systemd runs as PID 1. The privileged container is a disposable test host
+for this guide; ordinary application containers do not need this setup.
+It publishes no ports and mounts no host directories.
+Use a Docker engine that permits privileged containers and private cgroup
+namespaces. A rootless engine may not support this setup.
+
+## Connect and Run a Command
+
+Create `deploy.py`. Start with this connector:
+
+<!-- name: test_quickstart; case: connect; fixtures: quickstart_container; mark: docker, timeout(300) -->
 ```python
 import asyncio
-from rmote.protocol import Tool
+import os
+from contextlib import asynccontextmanager
 
-
-class Echo(Tool):
-    @staticmethod
-    def echo(value: str) -> str:
-        return value
-
-    @staticmethod
-    async def later(value: str, delay: float = 0.0) -> str:
-        await asyncio.sleep(delay)
-        return value
-```
-
-### Synchronous client
-
-Save this as `client_sync.py`. The factory starts a local Python interpreter and
-returns after the protocol handshake. The context closes its process and
-background thread, including when an exception leaves the block.
-
-<!-- name: test_local_sync; fixtures: lifecycle_module, __name__; marks: timeout(15) -->
-```python
-from lifecycle_tools import Echo
-from rmote.sync import Connection
-
-
-def main() -> None:
-    with Connection.from_local(rpc_timeout=5.0) as remote:
-        assert remote(Echo.echo, "hello") == "hello"
-        assert remote(Echo.later, "again") == "again"
-        assert remote.call_with_timeout(2.0, Echo.echo, "deadline") == "deadline"
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Each connection loads a Tool on its first call. Later calls reuse the loaded
-source. Keep the connection open across related operations.
-
-### Asynchronous client
-
-Save this as `client_async.py` beside the same tool module. The caller owns the
-subprocess passed to `from_subprocess`. The `finally` block terminates and
-reaps it after the protocol context closes.
-
-<!-- name: test_local_async; fixtures: lifecycle_module, __name__; marks: timeout(15) -->
-```python
-import asyncio
-import sys
-from lifecycle_tools import Echo
 from rmote.protocol import Protocol
+from rmote.tools import Apt, Exec, FileSystem, Service, User
 
 
-async def main() -> None:
+@asynccontextmanager
+async def connect():
+    container = os.environ.get("RMOTE_CONTAINER", "rmote-quickstart")
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
+        "docker", "exec", "-i", container, "python3", "-qui",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
     )
     try:
         async with await Protocol.from_subprocess(process) as remote:
-            assert await remote(Echo.echo, "hello") == "hello"
-            assert await remote(Echo.later, "again") == "again"
-            async with asyncio.timeout(2.0):
-                assert await remote(Echo.echo, "deadline") == "deadline"
+            yield remote
     finally:
         if process.returncode is None:
             try:
@@ -103,256 +81,348 @@ async def main() -> None:
             except ProcessLookupError:
                 pass
         await process.wait()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
-The `-qui` flags select quiet, unbuffered, isolated interpreter mode.
-For a process that can ignore termination, use a bounded wait and then kill it.
-The synchronous `Connection` implements that process cleanup automatically.
+Set `RMOTE_CONTAINER` if you used a different container name.
+The connector starts Python inside the container and lets rmote communicate
+through its standard input and output. It also closes the process after use.
+The later SSH connector manages its own process and is shorter.
 
-Runnable versions are in `examples/local_sync.py`, `examples/local_async.py`,
-and `examples/lifecycle_tools.py` in the repository.
+Append your first remote operation to `deploy.py`:
 
-## SSH Remote Process
-
-### Synchronous client
-
-Replace the local factory with {meth}`~rmote.sync.Connection.from_ssh`.
-The connection owns the SSH subprocess and its background runtime.
-
-<!-- name: test_ssh_sync; fixtures: docs_ssh; marks: timeout(20) -->
+<!-- name: test_quickstart; case: command -->
 ```python
-from rmote.sync import Connection
-from rmote.tools import FileSystem
+async def show_host():
+    async with connect() as remote:
+        result = await remote(Exec.command, "uname", "-s", capture_output=True)
+        assert result.stdout.strip() == b"Linux"
+        print(result.stdout.decode(), end="")
 
-with Connection.from_ssh("user@server", rpc_timeout=10.0) as remote:
-    files = remote(FileSystem.glob, "/", "*")
-    assert isinstance(files, list)
-    print(files)
+
+asyncio.run(show_host())
 ```
 
-### Asynchronous client
+Run `python deploy.py`. It should print `Linux`, even if your local machine
+runs macOS. The command executes inside the container.
 
-The existing async SSH factory remains available. Its protocol context
-completes the handshake and manages the owned SSH subprocess.
+`Exec` is a built-in **tool**: a group of functions that run on the target.
+Pass the function itself to `remote`, followed by its arguments.
+`Exec.command` returns a result with `stdout`, `stderr`, and `returncode`.
+Pass `capture_output=True` when you need output. Otherwise, both streams are
+discarded on the target, and `stdout` and `stderr` are `None`. Captured output
+is bytes; `.decode()` converts it to text.
+A failed command raises `subprocess.CalledProcessError` unless you pass
+`check=False`.
 
-<!-- name: test_ssh_async; fixtures: docs_ssh, __name__; marks: timeout(20) -->
-```python
-import asyncio
-from rmote.protocol import Protocol
-from rmote.tools import FileSystem
+## Create an Administrator
 
+Start with the account that will maintain this host. These operations need
+root, which is the default user of our Docker container. On an existing SSH
+host, use an account that can already run the required operations as root.
 
-async def main() -> None:
-    async with await Protocol.from_ssh("user@server") as remote:
-        files = await remote(FileSystem.glob, "/", "*")
-        assert isinstance(files, list)
-        print(files)
+Create a key for this disposable example on your local machine:
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```bash
+ssh-keygen -t ed25519 -N '' -f ./quickstart_key
 ```
 
-### SSH options and jump hosts
+Use a new filename if `quickstart_key` already exists. Only its `.pub` file is
+sent to the target. Set `RMOTE_SSH_PUBLIC_KEY` to use another public key.
+For a real administrator account, use the public key you intend to authorize.
 
-Both factories accept `user`, `port`, `identity`, `python`, `ssh_options`, and
-`stderr`. Paths refer to the remote host, except the local identity file.
-`python` selects the remote interpreter. Extra SSH arguments precede the host.
+Append this step to `deploy.py`:
 
-<!-- name: test_ssh_sync_options; fixtures: docs_ssh; marks: timeout(20) -->
-```python
-from rmote.sync import Connection
-from rmote.tools import FileSystem
-
-with Connection.from_ssh(
-    "myserver",
-    user="deploy",
-    port=2222,
-    identity="/home/deploy/.ssh/id_ed25519",
-    python="python3.11",
-    ssh_options=["-o", "BatchMode=yes", "-J", "bastion.example.com"],
-    connect_timeout=20.0,
-    rpc_timeout=10.0,
-    close_timeout=5.0,
-) as remote:
-    print(remote(FileSystem.glob, "/var/log", "*.log"))
-```
-
-For the async client, pass the same SSH arguments to `await Protocol.from_ssh(...)`.
-The async factory does not accept the three synchronous deadline arguments.
-Use `asyncio.timeout(...)` around the async operation that needs a deadline.
-
-Pass `ssh_options=["-J", "bastion.example.com"]` for one jump host. For multiple
-jumps, use a comma-separated value such as
-`"deploy@bastion1.example.com:2222,relay@bastion2.internal"`.
-The client communicates with the final destination through the SSH tunnel.
-
-With synchronous `stderr=subprocess.PIPE`, the connection continuously reads
-and discards stderr. Use inherited stderr, for example `stderr=2`, when you
-need SSH diagnostics. With the async factory, the caller must arrange reading
-when selecting `stderr=asyncio.subprocess.PIPE`.
-
-## Deadlines, Errors, and Interruptions
-
-| Synchronous argument | Default | Scope |
-|---|---|---|
-| `connect_timeout` | `30.0` seconds | Process creation, bootstrap, and handshake |
-| `rpc_timeout` | `None` | Each call, including the first Tool upload, send, and response |
-| `close_timeout` | `5.0` seconds | Graceful protocol and process shutdown |
-
-`None` disables a connect or RPC deadline. Numeric deadlines must be finite and
-positive. `close_timeout` must be finite and positive and cannot be `None`.
-Invalid values raise `ValueError` before the factory creates resources.
-
-Use `call_with_timeout(timeout, tool, /, *args, **kwargs)` to override one call's
-RPC deadline. Both the deadline and method are positional. Every keyword
-argument belongs to the remote method, including `timeout` and `tool`.
-
-<!-- name: test_sync_deadline; fixtures: lifecycle_module, __name__; marks: timeout(15) -->
-```python
-from lifecycle_tools import Echo
-from rmote.sync import Connection
-
-
-def main() -> None:
-    with Connection.from_local(rpc_timeout=5.0) as remote:
-        try:
-            remote.call_with_timeout(0.05, Echo.later, "slow", delay=0.5)
-        except TimeoutError:
-            print("Local waiting stopped; the remote operation can continue.")
-        else:
-            raise AssertionError("The delayed call must exceed its deadline")
-        assert remote(Echo.echo, "still open") == "still open"
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Timeout and `KeyboardInterrupt` stop local waiting and remove the pending
-request. They do not cancel remote work. A remote write or package operation
-can still complete. Cancellation while transmitting a packet can break the
-channel; close the connection after a transport failure and create another.
-Late responses to cancelled requests are ignored.
-
-Remote exceptions are raised locally. Use `try` inside the context to handle
-an expected operation error while keeping the connection open:
-
-<!-- name: test_sync_remote_error; fixtures: __name__; marks: timeout(15) -->
+<!-- name: test_quickstart; case: administrator -->
 ```python
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from rmote.sync import Connection
-from rmote.tools import FileSystem
+
+ADMIN = "deploy"
+public_key = Path(os.environ.get("RMOTE_SSH_PUBLIC_KEY", "quickstart_key.pub")).read_text().strip()
 
 
-def main() -> None:
-    with TemporaryDirectory() as directory:
-        missing = str(Path(directory) / "missing.txt")
-        with Connection.from_local(rpc_timeout=5.0) as remote:
-            try:
-                remote(FileSystem.read_str, missing)
-            except FileNotFoundError:
-                print("The remote file does not exist.")
-            else:
-                raise AssertionError("A missing file must raise FileNotFoundError")
-            assert remote(FileSystem.glob, directory, "*") == []
+async def prepare_administrator():
+    async with connect() as remote:
+        user = await remote(User.present, ADMIN, create_home=True, shell="/bin/bash")
+        assert user.name == ADMIN and user.home == f"/home/{ADMIN}"
+        assert user.uid != 0
+        assert not (await remote(User.present, ADMIN, create_home=True, shell="/bin/bash")).changed
+
+        await remote(User.authorized_key, ADMIN, public_key)
+        keys = await remote(FileSystem.read_str, f"{user.home}/.ssh/authorized_keys")
+        assert public_key in keys.splitlines()
+        assert not await remote(User.authorized_key, ADMIN, public_key)
+        print(f"{user.name}: uid={user.uid}, home={user.home}")
 
 
-if __name__ == "__main__":
-    main()
+asyncio.run(prepare_administrator())
 ```
 
-Transport errors can include `ConnectionError`, `BrokenPipeError`, or EOF
-errors. A failed connection does not reconnect automatically. A factory cleans
-up partially created resources before propagating startup failure or interruption.
+Run `python deploy.py`. `User.present` creates the user and home directory if
+needed. `User.authorized_key` adds the public key while retaining existing keys.
+Repeating these calls with unchanged settings makes no further changes.
 
-## Explicit Closing
+The container uses `docker exec`, so this step does not require an SSH server.
+On an SSH host, the key permits login only if its SSH server allows this user
+and public-key authentication. Creating the account does not configure sshd.
 
-Use `finally` when a context manager does not fit your application:
+## Grant and Check sudo Access
 
-<!-- name: test_sync_explicit_close; fixtures: lifecycle_module, client_resources; marks: timeout(15) -->
+Install `sudo`, then create and check its rule:
+
+<!-- name: test_quickstart; case: sudo -->
 ```python
-from lifecycle_tools import Echo
-from rmote.sync import Connection
+async def configure_sudo():
+    async with connect() as remote:
+        await remote(Apt.update, ttl=3600)
+        package = await remote(Apt.package, "sudo")
+        assert package.version
+        await remote(User.sudoer, ADMIN, nopasswd=True)
+        assert not await remote(User.sudoer, ADMIN, nopasswd=True)
 
-remote = Connection.from_local(rpc_timeout=5.0)
-try:
-    assert remote(Echo.echo, "first") == "first"
-    assert remote(Echo.later, "second") == "second"
-finally:
-    remote.close()
+        rule = await remote(FileSystem.read_str, f"/etc/sudoers.d/{ADMIN}")
+        assert rule == f"{ADMIN} ALL=(ALL) NOPASSWD: ALL\n"
+        await remote(Exec.command, "visudo", "-cf", "/etc/sudoers")
+        result = await remote(
+            Exec.command, "su", "-", ADMIN, "-c", "sudo -n id -u",
+            capture_output=True,
+        )
+        assert result.stdout.strip() == b"0"
 
-remote.close()  # Repeated close is safe.
+
+asyncio.run(configure_sudo())
 ```
 
-A synchronous connection owns one subprocess and one private background loop
-thread. `close()` closes the protocol, reaps the process, and joins that thread.
-After the graceful deadline, cleanup uses terminate, a one-second grace period,
-then kill and wait. Local cancellation and executor shutdown must cooperate;
-`close_timeout` does not impose a fixed total duration on `close()`.
+Run the script again. `User.sudoer` writes `/etc/sudoers.d/deploy` with mode
+`0440`. It grants this account passwordless access to **all commands as root**.
+Use this rule for an account that you intend to make a full administrator.
 
-Calls after closing and nested `with` entry raise `RuntimeError`.
-The context does not suppress exceptions from its body. If cleanup also fails,
-the body exception is preserved and the cleanup error is logged.
+`User.sudoer` does not validate the rule itself. The example runs `visudo`
+after writing it, then executes `sudo -n id -u` as `deploy`. The assertion
+checks that sudo actually runs as root without a password prompt.
 
-## Concurrent Calls and Async Applications
+The remaining steps keep the initial root connection. rmote does not use sudo
+automatically when you connect as a user with a sudoers entry.
 
-An open `Connection` accepts calls from multiple caller threads. Use
-`ThreadPoolExecutor` to dispatch concurrent synchronous calls. For `Protocol`,
-use `asyncio.gather`. See {doc}`multi-host` for both patterns and persistent sessions.
+## Install Redis
 
-In an async application, prefer `Protocol`. If you need the synchronous client,
-move its complete lifecycle into a worker thread:
+Append this step to the same script:
 
-<!-- name: test_sync_from_async; fixtures: lifecycle_module, __name__; marks: timeout(15) -->
+<!-- name: test_quickstart; case: install -->
 ```python
-import asyncio
-from lifecycle_tools import Echo
-from rmote.sync import Connection
+async def install_redis():
+    async with connect() as remote:
+        await remote(Apt.update, ttl=3600)
+        package = await remote(Apt.package, "redis-server")
+        assert package.name == "redis-server" and package.version
+        unchanged = await remote(Apt.package, "redis-server")
+        assert not unchanged.changed
+        print(f"Redis {package.version}: changed={package.changed}")
 
 
-def fetch() -> str:
-    with Connection.from_local(rpc_timeout=5.0) as remote:
-        return remote(Echo.echo, "hello")
-
-
-async def main() -> None:
-    assert await asyncio.to_thread(fetch) == "hello"
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(install_redis())
 ```
 
-Direct synchronous calls block the calling event loop. Cancelling an await of
-`asyncio.to_thread` does not stop its worker; set an RPC deadline and retain
-ownership until the worker finishes.
+Run `python deploy.py` again. `Apt.update` refreshes the package index, at most
+once per hour here. `Apt.package` installs Redis if it is missing. Later runs
+return `changed=False` for an already installed package.
 
-Remote log records invoke local handlers in the connection's background loop
-thread. Handlers must be thread safe. They must not call that connection's
-synchronous methods, which raise `RuntimeError` from its own loop thread.
+These operations run as root in the container. On an SSH host, the login must
+have the required permissions; rmote does not elevate privileges automatically.
+The package also supplies the `redis` user and `redis-cli` command.
+It may start the distribution's default service on port 6379. Our separate
+cache uses port 6380 and does not replace that service.
 
-## Troubleshooting
+## Render a systemd Service
 
-**SSH refuses the connection or reports an authentication error.**
-Verify access with `ssh user@host`. Load the key with `ssh-add` or pass its path
-in `identity`. Add `"-v"` to `ssh_options` and use inherited stderr for diagnostics.
+The cache will listen on `127.0.0.1:6380`, with a 64 MiB memory limit.
+It keeps no persistent data, so restarting it clears the cache.
+Append this template to `deploy.py`:
 
-**The remote Python executable is missing.**
-Pass the remote interpreter's name or absolute path in `python`.
+<!-- name: test_quickstart; case: template -->
+```python
+from rmote.protocol import Template
 
-**The connection drops before the handshake.**
-Check remote interpreter errors and shell startup output. Startup scripts must
-not write into the protocol's stdin/stdout channel.
+PORT = 6380
+SERVICE = "rmote-cache.service"
+UNIT_PATH = f"/etc/systemd/system/{SERVICE}"
 
-**A custom return type cannot be unpickled.**
-Define the type in the same importable module as its Tool and keep local client
-setup separate. See {ref}`returning-custom-types` in {doc}`writing-tools`.
+unit = Template('''\
+[Unit]
+Description=Redis cache managed by rmote
+After=network.target
 
-See {doc}`concepts` for resource ownership and cancellation, and
-{doc}`api/sync` for the complete synchronous API.
+[Service]
+Type=notify
+User=redis
+Group=redis
+ExecStart=/usr/bin/redis-server --bind 127.0.0.1 --port ${port} --supervised systemd --daemonize no --save "" --appendonly no --maxmemory ${memory} --maxmemory-policy allkeys-lru
+Restart=on-failure
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
+''').render(port=PORT, memory="64mb")
+```
+
+`${port}` and `${memory}` are template variables. `Template.render` replaces
+them locally and returns a string. No template engine is needed on the target.
+The {doc}`templating` guide also covers conditions, loops, and remote rendering.
+
+`Type=notify` makes systemd wait for Redis to signal readiness before the start
+operation completes. Redis uses this combination in its
+[example systemd unit](https://github.com/redis/redis/blob/unstable/utils/systemd-redis_server.service).
+
+## Write the Unit and Start the Service
+
+Append the deployment step:
+
+<!-- name: test_quickstart; case: service -->
+```python
+async def configure_cache():
+    async with connect() as remote:
+        try:
+            previous = await remote(FileSystem.read_str, UNIT_PATH)
+        except FileNotFoundError:
+            previous = None
+
+        if previous != unit:
+            await remote(Exec.command, "tee", UNIT_PATH, stdin=unit)
+            await remote(Service.daemon_reload)
+            await remote(Service.restart, SERVICE)
+
+        assert await remote(FileSystem.read_str, UNIT_PATH) == unit
+        service = await remote(Service.converge, SERVICE, started=True, enabled=True)
+        assert service.started and service.enabled
+        unchanged = await remote(Service.converge, SERVICE, started=True, enabled=True)
+        assert not unchanged.changed
+        print(f"{service.name}: started={service.started}, enabled={service.enabled}")
+
+        result = await remote(Exec.command, "redis-cli", "-p", str(PORT), "PING", capture_output=True)
+        assert result.stdout.strip() == b"PONG"
+        print(result.stdout.decode(), end="")
+
+
+asyncio.run(configure_cache())
+```
+
+Run `python deploy.py`. The final output should include:
+
+```text
+rmote-cache.service: started=True, enabled=True
+PONG
+```
+
+The script compares the remote file with the rendered template. If it changed,
+`tee` writes the new content from standard input, systemd reloads its unit files,
+and the service restarts. `Service.converge` ensures the service is running and
+enabled at boot. An unchanged rerun does not rewrite the unit or restart Redis.
+
+You can verify it outside Python too:
+
+```bash
+docker exec rmote-quickstart systemctl status rmote-cache.service --no-pager
+docker exec rmote-quickstart redis-cli -p 6380 PING
+```
+
+The cache is available to applications on the target through its loopback
+interface. No Redis port is exposed to your network.
+
+## Check an Unchanged Rerun
+
+Store a value, run the configuration step again, and check that the value
+survives. This cache has no persistence, so a restart would lose the value.
+Append this check to the script:
+
+<!-- name: test_quickstart; case: unchanged_rerun -->
+```python
+async def check_rerun():
+    async with connect() as remote:
+        result = await remote(Exec.command, "redis-cli", "-p", str(PORT), "SET", "rmote:check", "hello", capture_output=True)
+        assert result.stdout.strip() == b"OK"
+
+    await configure_cache()
+
+    async with connect() as remote:
+        result = await remote(Exec.command, "redis-cli", "-p", str(PORT), "GET", "rmote:check", capture_output=True)
+        assert result.stdout.strip() == b"hello"
+        await remote(Exec.command, "redis-cli", "-p", str(PORT), "DEL", "rmote:check")
+
+
+asyncio.run(check_rerun())
+```
+
+## Write a Tool for Your Application
+
+Built-in tools covered installation and service management. Add your own tool
+when you want to group application-specific work and return Python values.
+For example, read Redis statistics without parsing them in every client.
+
+Save this as `cache_tools.py` beside `deploy.py`:
+
+```{literalinclude} ../examples/quickstart/cache_tools.py
+:language: python
+```
+
+Append this call to `deploy.py`:
+
+<!-- name: test_quickstart; case: custom -->
+```python
+from cache_tools import Cache
+
+
+async def show_cache_stats():
+    async with connect() as remote:
+        stats = await remote(Cache.stats, PORT)
+        assert int(stats["total_commands_processed"]) > 0
+        print("Commands processed:", stats["total_commands_processed"])
+
+
+asyncio.run(show_cache_stats())
+```
+
+Run `python deploy.py` again. rmote transfers `cache_tools.py` on the first call,
+executes the method in the container, and returns a Python dictionary.
+You do not need to install or copy your tool separately on the target.
+
+Keep the tool in its own module because rmote transfers the whole module.
+The `process` helper captures command output without interfering with the
+connection. Continue with {doc}`writing-tools` for return types and dependencies.
+
+## Use the Same Deployment over SSH
+
+On a Debian or Ubuntu host with systemd and Python 3.11 or newer, first check
+that `ssh root@server python3 --version` works. Then replace only `connect()`
+in `deploy.py`:
+
+<!-- name: test_quickstart; case: ssh -->
+```python
+@asynccontextmanager
+async def connect():
+    async with await Protocol.from_ssh("root@server") as remote:
+        yield remote
+```
+
+Run the same script. Package installation, template rendering, service
+management, and your custom tool need no changes. Replace `root@server` with
+your target; this run installs software and creates a service there.
+
+For a specific key or port, pass `identity="/path/to/key"` or `port=2222` to
+`Protocol.from_ssh`.
+
+## Clean Up and Continue
+
+When you finish with the Docker example, remove its disposable host:
+
+```bash
+docker stop rmote-quickstart
+```
+
+The container was started with `--rm`, so stopping it removes its files too.
+Delete the local `quickstart_key` and `quickstart_key.pub` files if you created
+them only for this tutorial.
+
+- {doc}`writing-tools`: build reusable tools and return structured results.
+- {doc}`templating`: render more complex configuration files.
+- {doc}`multi-host`: deploy to several hosts.
+- {doc}`api/sync`: use the synchronous client in applications without asyncio.
+- {doc}`concepts`: understand execution, resource ownership, and cancellation.
