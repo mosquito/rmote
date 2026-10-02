@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from rmote.sync import Connection
+from tests.ssh_fixtures import local_sshd as local_sshd
 from tests.sync_tools import Environment
 
 
@@ -104,7 +105,8 @@ def test_handshake_timeout_drains_stderr_and_kills_stubborn_process(tmp_path, mo
     processes = record_processes(monkeypatch)
     threads = set(threading.enumerate())
     with pytest.raises(TimeoutError):
-        Connection.from_local(python=executable, stderr=subprocess.PIPE, connect_timeout=0.3, close_timeout=0.1)
+        # Allow interpreter startup under load before testing SIGKILL escalation.
+        Connection.from_local(python=executable, stderr=subprocess.PIPE, connect_timeout=5.0, close_timeout=0.1)
     assert processes[0].returncode == -signal.SIGKILL
     assert set(threading.enumerate()) == threads
 
@@ -242,80 +244,3 @@ def test_keyboard_interrupt_during_handshake_recovers_process(tmp_path, monkeypa
         Connection.from_local(python=executable, close_timeout=0.1)
     assert processes[0].returncode is not None
     assert set(threading.enumerate()) == threads
-
-
-@pytest.fixture
-def local_sshd(tmp_path):
-    import getpass
-    import shutil
-    import socket
-    import time
-
-    sshd = shutil.which("sshd") or "/usr/sbin/sshd"
-    keygen = shutil.which("ssh-keygen")
-    if not os.path.isfile(sshd) or keygen is None:
-        pytest.skip("sshd and ssh-keygen are required for local SSH integration")
-    host_key = tmp_path / "host_key"
-    client_key = tmp_path / "client_key"
-    for key in [host_key, client_key]:
-        subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    config = tmp_path / "sshd_config"
-    config.write_text(
-        f"ListenAddress 127.0.0.1\nPort {port}\nHostKey {host_key}\n"
-        f"AuthorizedKeysFile {client_key}.pub\nPidFile {tmp_path / 'sshd.pid'}\n"
-        "StrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-        "UsePAM no\nLogLevel ERROR\n"
-        f"AllowUsers {getpass.getuser()}\n"
-    )
-    error_log = tmp_path / "sshd.log"
-    with error_log.open("w") as stderr:
-        server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)], stderr=stderr)
-        try:
-            deadline = time.monotonic() + 5
-            while True:
-                if server.poll() is not None:
-                    pytest.fail(f"Isolated sshd startup failed: {error_log.read_text()}")
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                        break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail("Isolated sshd did not start")
-                    time.sleep(0.01)
-            yield port, str(client_key), getpass.getuser()
-        finally:
-            server.terminate()
-            try:
-                server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait()
-
-
-def test_real_ssh_handshake(local_sshd):
-    port, key, user = local_sshd
-    with Connection.from_ssh(
-        "127.0.0.1",
-        user=user,
-        port=port,
-        identity=key,
-        python=sys.executable,
-        ssh_options=[
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "IdentitiesOnly=yes",
-        ],
-        stderr=subprocess.PIPE,
-        connect_timeout=5.0,
-    ) as connection:
-        assert call(connection, Environment.inspect)[0]
-    assert connection._process is not None
-    assert connection._process.returncode is not None

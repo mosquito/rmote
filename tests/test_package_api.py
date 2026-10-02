@@ -111,6 +111,7 @@ def distribution_artifacts(tmp_path_factory: pytest.TempPathFactory) -> dict[str
 
 
 @pytest.mark.parametrize("kind", ["wheel", "sdist"])
+@pytest.mark.timeout(180)
 def test_installed_distribution_exports_types_and_runs_both_clients(
     kind: str,
     distribution_artifacts: dict[str, Path],

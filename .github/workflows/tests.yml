@@ -28,10 +28,15 @@ jobs:
       - run: uv run mypy .
 
   tests:
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONASYNCIODEBUG: "1"
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python:
           - "3.11"
           - "3.12"
@@ -43,4 +48,32 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --frozen
-      - run: uv run pytest -vv --cov=rmote --cov-report=term-missing
+      - name: Prepare isolated SSH server support
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo install -d -m 755 /run/sshd
+      - name: Build wheel and source distribution
+        run: uv build --out-dir "$RUNNER_TEMP/rmote-dist" --no-create-gitignore
+      - name: Test APIs, installed artifacts, and executable documentation
+        run: >-
+          uv run pytest -vv --no-docker --require-ssh --timeout=30
+          -W error::RuntimeWarning -W error::ResourceWarning
+          -W error::pytest.PytestUnraisableExceptionWarning
+          -W error::pytest.PytestUnhandledThreadExceptionWarning
+          --cov=rmote --cov-report=term-missing
+
+  docker-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      - run: uv sync --frozen
+      - name: Check Docker availability
+        run: docker info
+      - name: Test Linux package and system tools
+        run: uv run pytest -vv -m docker --timeout=180
