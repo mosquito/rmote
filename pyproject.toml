@@ -1,6 +1,6 @@
 [project]
 name = "rmote"
-version = "0.2.0"
+version = "0.4.0"
 description = "Control any remote host. No agent. No install. Just a bare interpreter."
 readme = "README.md"
 requires-python = ">=3.11"
