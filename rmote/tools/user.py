@@ -277,6 +277,8 @@ class User(Tool):
                 return False
 
         with auth_keys.open("a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
             f.write(key + "\n")
         auth_keys.chmod(0o600)
         os.chown(auth_keys, pw.pw_uid, pw.pw_gid)
