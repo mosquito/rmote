@@ -1,0 +1,386 @@
+"""Lifecycle and thread-boundary checks for the local synchronous runtime."""
+
+import asyncio
+import contextvars
+import subprocess
+import sys
+import threading
+from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from types import AsyncGeneratorType
+
+import pytest
+
+from rmote._runtime import _Runtime
+
+pytestmark = pytest.mark.timeout(10)
+
+
+@pytest.fixture
+def runtime() -> Iterator[_Runtime]:
+    instance = _Runtime()
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+def test_factory_runs_on_ready_loop_and_preserves_context(runtime: _Runtime) -> None:
+    caller = threading.get_ident()
+    context = contextvars.ContextVar("runtime-test", default="unset")
+
+    def factory():
+        loop = asyncio.get_running_loop()
+        assert loop.is_running()
+        assert threading.get_ident() != caller
+        return asyncio.sleep(0, result=(loop, context.get(), threading.current_thread().daemon))
+
+    context.set("first")
+    loop, value, daemon = runtime.run(factory)
+    assert value == "first"
+    assert not daemon
+    context.set("second")
+    same_loop, value, _ = runtime.run(factory)
+    assert same_loop is loop
+    assert value == "second"
+
+
+@pytest.mark.parametrize("error", [ValueError("failure"), RuntimeError("failure"), SystemExit(7), KeyboardInterrupt()])
+def test_factory_exceptions_reach_caller_without_stopping_loop(runtime: _Runtime, error: BaseException) -> None:
+    async def fail() -> None:
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        runtime.run(fail)
+    assert raised.value is error
+    assert runtime.run(lambda: asyncio.sleep(0, result="still open")) == "still open"
+
+
+def test_exception_during_factory_creation_reaches_caller(runtime: _Runtime) -> None:
+    def factory():
+        raise ValueError("cannot create coroutine")
+
+    with pytest.raises(ValueError, match="cannot create coroutine"):
+        runtime.run(factory)
+    assert runtime.run(lambda: asyncio.sleep(0, result=1)) == 1
+
+
+def test_concurrent_callers_get_their_own_results(runtime: _Runtime) -> None:
+    with ThreadPoolExecutor(max_workers=8) as callers:
+        futures = [callers.submit(runtime.run, lambda i=i: asyncio.sleep(0, result=i)) for i in range(40)]
+        assert [future.result(timeout=5) for future in futures] == list(range(40))
+
+
+def test_cancel_before_start_does_not_call_factory(runtime: _Runtime) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    called = threading.Event()
+
+    async def hold_loop() -> None:
+        entered.set()
+        assert release.wait(5)
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    blocking = runtime.submit(hold_loop)
+    try:
+        assert entered.wait(5)
+        future = runtime.submit(factory)
+        assert future.cancel()
+    finally:
+        release.set()
+    blocking.result(timeout=5)
+    runtime.run(lambda: asyncio.sleep(0))
+    assert future.cancelled()
+    assert not called.is_set()
+
+
+def test_cancel_running_request_runs_its_cleanup(runtime: _Runtime) -> None:
+    entered = threading.Event()
+    cleaned = threading.Event()
+
+    async def wait() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    future = runtime.submit(wait)
+    assert entered.wait(5)
+    assert future.cancel()
+    assert cleaned.wait(5)
+    assert runtime.run(lambda: asyncio.sleep(0, result=2)) == 2
+
+
+def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime) -> None:
+    cleaned = threading.Event()
+
+    async def wait() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    with pytest.raises(TimeoutError):
+        runtime.run(wait, timeout=0.05)
+    assert cleaned.wait(5)
+    assert runtime.run(lambda: asyncio.sleep(0, result=3)) == 3
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan")])
+def test_invalid_timeout_rejects_factory(runtime: _Runtime, timeout: float) -> None:
+    called = threading.Event()
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        runtime.run(factory, timeout=timeout)
+    assert not called.is_set()
+
+
+def test_keyboard_interrupt_cancels_running_wait_in_subprocess() -> None:
+    script = """
+import asyncio
+import os
+import signal
+import threading
+from rmote._runtime import _Runtime
+
+entered = threading.Event()
+cleaned = threading.Event()
+runtime = _Runtime()
+
+async def wait():
+    entered.set()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        cleaned.set()
+
+def interrupt():
+    assert entered.wait(5)
+    os.kill(os.getpid(), signal.SIGINT)
+
+sender = threading.Thread(target=interrupt)
+sender.start()
+try:
+    try:
+        runtime.run(wait)
+    except KeyboardInterrupt:
+        assert cleaned.wait(5)
+    else:
+        raise AssertionError('KeyboardInterrupt was not forwarded')
+    assert runtime.run(lambda: asyncio.sleep(0, result=4)) == 4
+finally:
+    sender.join()
+    runtime.close()
+print('clean interrupt')
+"""
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=8)
+    assert process.returncode == 0, process.stderr
+    assert process.stdout.strip() == "clean interrupt"
+    assert not process.stderr
+
+
+def test_loop_thread_rejects_submit_run_and_close(runtime: _Runtime) -> None:
+    called = threading.Event()
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    async def check() -> None:
+        with pytest.raises(RuntimeError, match="event loop thread"):
+            runtime.submit(factory)
+        with pytest.raises(RuntimeError, match="event loop thread"):
+            runtime.run(factory)
+        with pytest.raises(RuntimeError, match="event loop thread"):
+            runtime.close()
+
+    runtime.run(check)
+    assert not called.is_set()
+
+
+def test_close_cancels_requests_and_background_tasks(runtime: _Runtime) -> None:
+    request_started = threading.Event()
+    background_started = threading.Event()
+    request_cleaned = threading.Event()
+    background_cleaned = threading.Event()
+
+    async def background() -> None:
+        background_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            background_cleaned.set()
+
+    async def wait() -> None:
+        asyncio.create_task(background())
+        request_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            request_cleaned.set()
+
+    future = runtime.submit(wait)
+    assert request_started.wait(5)
+    assert background_started.wait(5)
+    runtime.close()
+    assert future.cancelled()
+    assert request_cleaned.is_set()
+    assert background_cleaned.is_set()
+    assert not runtime._thread.is_alive()
+
+
+def test_close_finalizes_async_generators(runtime: _Runtime) -> None:
+    cleaned = threading.Event()
+
+    async def generator() -> AsyncIterator[str]:
+        try:
+            yield "first"
+        finally:
+            cleaned.set()
+
+    async def open_generator() -> AsyncIterator[str]:
+        value = generator()
+        assert await anext(value) == "first"
+        return value
+
+    value = runtime.run(open_generator)
+    runtime.close()
+    assert cleaned.is_set()
+    assert isinstance(value, AsyncGeneratorType)
+    assert value.ag_frame is None
+
+
+def test_close_waits_for_executor_work(runtime: _Runtime) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+
+    def worker() -> None:
+        entered.set()
+        assert release.wait(5)
+        worker_finished.set()
+
+    future = runtime.submit(lambda: asyncio.to_thread(worker))
+    try:
+        assert entered.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as closer:
+            closing = closer.submit(runtime.close)
+            try:
+                with pytest.raises(TimeoutError):
+                    closing.result(timeout=0.05)
+            finally:
+                release.set()
+            closing.result(timeout=5)
+    finally:
+        release.set()
+    assert worker_finished.is_set()
+    assert future.cancelled()
+    assert not runtime._thread.is_alive()
+
+
+def test_repeated_and_concurrent_close_rejects_new_factories(runtime: _Runtime) -> None:
+    with ThreadPoolExecutor(max_workers=4) as closers:
+        calls = [closers.submit(runtime.close) for _ in range(4)]
+        for call in calls:
+            call.result(timeout=5)
+    runtime.close()
+    called = threading.Event()
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="closing or closed"):
+        runtime.submit(factory)
+    assert not called.is_set()
+
+
+def test_submit_close_race_always_finishes_accepted_requests(runtime: _Runtime) -> None:
+    barrier = threading.Barrier(9)
+
+    def caller(i: int):
+        barrier.wait(timeout=5)
+        try:
+            return runtime.submit(lambda: asyncio.sleep(0, result=i))
+        except RuntimeError:
+            return None
+
+    def close() -> None:
+        barrier.wait(timeout=5)
+        runtime.close()
+
+    with ThreadPoolExecutor(max_workers=9) as workers:
+        callers = [workers.submit(caller, i) for i in range(8)]
+        closing = workers.submit(close)
+        futures = [caller.result(timeout=5) for caller in callers]
+        closing.result(timeout=5)
+    for i, future in enumerate(futures):
+        if future is not None:
+            try:
+                assert future.result(timeout=1) == i
+            except CancelledError:
+                pass
+    assert not runtime._thread.is_alive()
+
+
+def test_failed_loop_start_does_not_leave_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads = set(threading.enumerate())
+    failure = RuntimeError("cannot create loop")
+
+    def fail():
+        raise failure
+
+    monkeypatch.setattr(asyncio.events, "new_event_loop", fail)
+    with pytest.raises(RuntimeError, match="cannot create loop") as raised:
+        # Close an unexpectedly successful construction before reporting failure.
+        instance = _Runtime()
+        instance.close()
+    assert raised.value is failure
+    assert set(threading.enumerate()) == threads
+
+
+def test_interrupted_start_joins_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads = set(threading.enumerate())
+    result = Future.result
+    interrupted = False
+
+    def interrupt_once(self, timeout=None):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return result(self, timeout)
+
+    monkeypatch.setattr(Future, "result", interrupt_once)
+    with pytest.raises(KeyboardInterrupt):
+        _Runtime()
+    assert set(threading.enumerate()) == threads
+
+
+def test_failed_initialization_closes_created_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads = set(threading.enumerate())
+    loops: list[asyncio.AbstractEventLoop] = []
+    new_loop = asyncio.events.new_event_loop
+
+    def create_loop() -> asyncio.AbstractEventLoop:
+        loop = new_loop()
+        loops.append(loop)
+        return loop
+
+    def fail():
+        raise RuntimeError("cannot initialize runtime")
+
+    monkeypatch.setattr(asyncio.events, "new_event_loop", create_loop)
+    monkeypatch.setattr(asyncio, "Event", fail)
+    with pytest.raises(RuntimeError, match="cannot initialize runtime"):
+        _Runtime()
+    assert loops and all(loop.is_closed() for loop in loops)
+    assert set(threading.enumerate()) == threads

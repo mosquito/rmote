@@ -1,0 +1,80 @@
+Synchronous Connection
+======================
+
+Import ``Connection`` from ``rmote.sync`` or directly from ``rmote``.
+Create a connection with ``from_local`` or ``from_ssh``. Direct construction
+with ``Connection()`` raises ``TypeError``.
+
+.. py:class:: Connection
+   :module: rmote.sync
+
+   Own a subprocess, a protocol, and a private background event loop.
+   Use a factory and close the connection after its callers finish.
+
+   .. automethod:: rmote.sync.Connection.from_local
+
+   .. automethod:: rmote.sync.Connection.from_ssh
+
+   .. automethod:: rmote.sync.Connection.__call__
+
+   .. automethod:: rmote.sync.Connection.call_with_timeout
+
+   .. automethod:: rmote.sync.Connection.close
+
+   .. automethod:: rmote.sync.Connection.__enter__
+
+   .. automethod:: rmote.sync.Connection.__exit__
+
+Deadlines
+---------
+
+Both factories accept these keyword-only arguments:
+
+* ``connect_timeout=30.0`` limits process creation, bootstrap, and handshake.
+* ``rpc_timeout=None`` sets the default deadline for each Tool call.
+* ``close_timeout=5.0`` limits graceful protocol and process shutdown.
+
+``None`` disables a connect or RPC deadline. Numeric deadlines must be finite
+and positive. ``close_timeout`` must be finite and positive; it cannot be
+``None``. Invalid values raise ``ValueError`` before resource creation.
+
+``connection.call_with_timeout(timeout, tool, /, *args, **kwargs)`` overrides
+the default RPC deadline for one call. It includes the first Tool upload,
+packet transmission, and response. All keyword arguments go to the Tool
+method, including arguments named ``timeout`` or ``tool``.
+
+Timeout raises ``TimeoutError``. ``KeyboardInterrupt`` propagates unchanged.
+Both stop local waiting; the remote operation can continue. Cancellation
+during packet transmission can make the connection unusable. Close it and
+create a new connection after a transport failure.
+
+Ownership and concurrency
+-------------------------
+
+Each connection owns one subprocess, one protocol, and one private event loop
+in a background thread. Factories return after the handshake completes.
+Factory failure or interruption cleans up partially created resources.
+
+Use ``with`` or call ``close()`` in ``finally``. Closing rejects new calls,
+closes the channel, reaps the process, and joins the background thread.
+After ``close_timeout``, process cleanup uses terminate, a one-second grace
+period, then kill and wait. This is not a fixed total limit for ``close()``:
+local cancellation and executor shutdown require cooperative code.
+
+Repeated ``close()`` calls are safe. Concurrent closes wait for the same
+cleanup. Nested context entry and calls after closing raise ``RuntimeError``.
+Context exit preserves an exception raised by the body; cleanup errors are
+logged when a body exception already exists.
+
+Multiple caller threads can share an open connection. Remote log records run
+local logging handlers in the background loop thread. Handlers must be thread
+safe and must not call this connection's synchronous methods. Calls from its
+own loop thread raise ``RuntimeError``.
+
+In async applications, use ``Protocol`` or move the complete synchronous
+lifecycle into ``asyncio.to_thread``. A direct synchronous call blocks the
+calling event loop. Shared runtimes, automatic reconnect, and remote
+cancellation are not supported.
+
+See :doc:`../quickstart`, :doc:`../multi-host`, and :doc:`../writing-tools`
+for executable examples and Tool definitions.

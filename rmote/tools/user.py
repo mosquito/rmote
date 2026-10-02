@@ -82,6 +82,13 @@ class Backend:
 
         return [g.gr_name for g in grp.getgrall() if name in g.gr_mem]
 
+    @staticmethod
+    def get_comment(name: str) -> str:
+        """Return the user's current GECOS field."""
+        import pwd
+
+        return pwd.getpwnam(name).pw_gecos
+
 
 class User(Tool):
     """Manage users, groups, SSH keys, and sudoers on the remote host. Requires root."""
@@ -106,7 +113,7 @@ class User(Tool):
         Args:
             name: Username
             uid: Numeric UID (optional)
-            gid: Primary GID or group name (optional)
+            gid: Numeric primary GID (optional)
             comment: GECOS field
             home: Home directory path (default: /home/<name>)
             shell: Login shell
@@ -151,17 +158,23 @@ class User(Tool):
         uid_out, gid_out, home_out, shell_out = existing
         mod_args: list[str] = []
 
+        if uid is not None and uid_out != uid:
+            mod_args += ["--uid", str(uid)]
+        if gid is not None and gid_out != gid:
+            mod_args += ["--gid", str(gid)]
         if shell and shell_out != shell:
             mod_args += ["--shell", shell]
-        if comment:
+        if comment and Backend.get_comment(name) != comment:
             mod_args += ["--comment", comment]
         if home and home_out != home:
             mod_args += ["--home", home, "--move-home"]
         if groups is not None:
-            flag = "--append" if append_groups else ""
-            if flag:
-                mod_args += [flag, "--groups", ",".join(groups)]
-            else:
+            current_groups = set(Backend.get_groups(name))
+            desired_groups = set(groups)
+            matches = desired_groups <= current_groups if append_groups else desired_groups == current_groups
+            if not matches:
+                if append_groups:
+                    mod_args.append("--append")
                 mod_args += ["--groups", ",".join(groups)]
 
         if mod_args:
@@ -264,6 +277,8 @@ class User(Tool):
                 return False
 
         with auth_keys.open("a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
             f.write(key + "\n")
         auth_keys.chmod(0o600)
         os.chown(auth_keys, pw.pw_uid, pw.pw_gid)
@@ -272,7 +287,10 @@ class User(Tool):
     @staticmethod
     def sudoer(name: str, *, nopasswd: bool = True, absent: bool = False) -> bool:
         """
-        Manage a sudoers drop-in for a user in /etc/sudoers.d/.
+        Manage a sudoers drop-in granting all commands as any user.
+
+        Writes /etc/sudoers.d/<name> with mode 0440. The rule is not validated
+        with visudo; callers must validate the resulting sudo configuration.
 
         Args:
             name: Username

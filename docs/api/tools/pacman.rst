@@ -1,6 +1,9 @@
 Pacman
 ======
 
+Manage Arch Linux packages with ``pacman`` as root. Package and repository
+state refer to the target host.
+
 .. autoclass:: rmote.tools.pacman.State
    :members:
    :show-inheritance:

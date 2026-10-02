@@ -12,12 +12,13 @@ import subprocess
 import sys
 import textwrap
 import threading
+import tokenize
 from collections.abc import Callable, Coroutine
 from functools import cache
 from lzma import compress, decompress
 from pathlib import Path
 from types import FunctionType
-from typing import Any, ParamSpec, Self, TypedDict, TypeVar, cast, overload
+from typing import Any, NotRequired, ParamSpec, Self, TypedDict, TypeVar, cast, overload
 
 
 class Template:
@@ -58,7 +59,8 @@ class Template:
         """Split *line* into ``(is_expr, fragment)`` pairs.
 
         Handles ``\\${`` escape (→ literal ``${``), bare ``$`` (literal),
-        and nested ``{}`` inside expressions via brace-depth counting.
+        and nested ``{}`` inside expressions. Python string tokens do not
+        change the brace depth.
         """
         result: list[tuple[bool, str]] = []
         buf: list[str] = []
@@ -76,20 +78,25 @@ class Template:
                     buf = []
                 i += 2  # consume '${'
                 depth = 1
-                expr: list[str] = []
-                while i < n and depth > 0:
-                    ch = line[i]
-                    if ch == "{":
-                        depth += 1
-                        expr.append(ch)
-                    elif ch == "}":
-                        depth -= 1
-                        if depth > 0:
-                            expr.append(ch)
+                start = i
+                try:
+                    tokens = tokenize.generate_tokens(io.StringIO(line[start:]).readline)
+                    for token in tokens:
+                        if token.type != tokenize.OP:
+                            continue
+                        if token.string == "{":
+                            depth += 1
+                        elif token.string == "}":
+                            depth -= 1
+                            if depth == 0:
+                                end = start + token.start[1]
+                                result.append((True, line[start:end]))
+                                i = end + 1
+                                break
                     else:
-                        expr.append(ch)
-                    i += 1
-                result.append((True, "".join(expr)))
+                        raise SyntaxError("Unclosed template expression")
+                except tokenize.TokenError as exc:
+                    raise SyntaxError("Invalid template expression") from exc
             else:
                 buf.append(line[i])
                 i += 1
@@ -103,8 +110,8 @@ class Template:
         """Compile a Mako-like *template* string into a reusable render function.
 
         Returns a callable that accepts ``**ctx`` keyword arguments and returns
-        the rendered string.  Results are cached so repeated
-        calls with the same template string are free.
+        the rendered string. Compiled functions are cached by source text
+        within this process. Rendering still executes the function.
         """
         indent_level = 0
         indent_unit = "    "
@@ -196,6 +203,7 @@ class LogRecord(TypedDict):
     msg: str
     args: Any
     exc_info: Any
+    exc_text: NotRequired[str | None]
 
 
 def bootstrap_packer(code: bytes) -> bytes:
@@ -226,6 +234,8 @@ def process(
 
     Tools must be use only this function for execute subprocesses,
     to avoid conflicts with protocol communication.
+
+    String stdin is encoded in binary mode. Text mode requires string stdin.
     """
     logging.debug("Executing subprocess: %r", cmd_and_args)
 
@@ -240,7 +250,9 @@ def process(
     }
 
     if stdin is not None:
-        if isinstance(stdin, str):
+        if text and isinstance(stdin, bytes):
+            raise TypeError("stdin must be str when text=True")
+        if isinstance(stdin, str) and not text:
             stdin = stdin.encode()
         # Use input= (not stdin=) so subprocess uses PIPE internally;
         # remove stdin=DEVNULL to avoid the "stdin and input may not both be used" error.
@@ -390,8 +402,15 @@ class BaseProtocol:
                 payload = await asyncio.to_thread(compress, payload)
                 flags |= Flags.COMPRESSED
             header = self.PACKET_HEADER.pack(self.MAGIC, flags, len(payload), packet_id)
-            self.writer.write(header + payload)
-            await self.writer.drain()
+            if self.writer.is_closing():
+                raise ConnectionError("Connection closed")
+            try:
+                self.writer.write(header + payload)
+                await self.writer.drain()
+            except BaseException:
+                # The peer may have received only part of the packet.
+                self.writer.close()
+                raise
 
     async def write_boundary(self) -> None:
         async with self.write_lock:
@@ -417,7 +436,7 @@ class BaseProtocol:
     async def from_subprocess(cls, process: asyncio.subprocess.Process) -> Self:
         assert process.stdin is not None, "Process stdin must not be None"
         assert process.stdout is not None, "Process stdout must not be None"
-        process.stdin.write(bootstrap_packer(open(__file__, "rb").read()))
+        process.stdin.write(bootstrap_packer(Path(__file__).read_bytes()))
         process.stdin.write(b"asyncio.run(run())\n")
         return cls(reader=process.stdout, writer=process.stdin)
 
@@ -527,11 +546,14 @@ class Protocol(BaseProtocol):
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         super().__init__(reader, writer)
         self._tools_cache: set[type[Tool]] = set()
+        self._tool_sync_locks: dict[type[Tool], asyncio.Lock] = {}
+        self._tool_load_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.futures: dict[int, asyncio.Future[Any]] = {}
         self.loop = asyncio.get_running_loop()
         self._tools_cache = set()
         self._loop_task: asyncio.Task[None] | None = None
         self._closed = asyncio.Event()
+        self._close_error: Exception | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
         self.tools: dict[str, Tool] = dict()
 
@@ -541,8 +563,8 @@ class Protocol(BaseProtocol):
         self.__last_id = 0
         self.__last_id_lock = threading.Lock()
 
-        # Separate ID generation for LOG packets (use negative IDs to avoid conflicts)
-        self.__last_log_id = 0
+        # LOG IDs count down within the unsigned 64-bit wire field; RPC IDs count up.
+        self.__last_log_id = 1 << 64
         self.__last_log_id_lock = threading.Lock()
 
     def get_id(self) -> int:
@@ -562,13 +584,15 @@ class Protocol(BaseProtocol):
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self._closed.set()
+        self._finish_pending(ConnectionError("Connection closed"))
+        tasks = list(self._tasks)
         if self._loop_task:
             self._loop_task.cancel()
-            for task in self._tasks:
-                task.cancel()
-            await asyncio.gather(self._loop_task, *self._tasks, return_exceptions=True)
-            self._loop_task = None
+            tasks.append(self._loop_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._loop_task = None
         self.writer.close()
         try:
             await self.writer.wait_closed()
@@ -582,12 +606,23 @@ class Protocol(BaseProtocol):
             await self._owned_process.wait()
             self._owned_process = None
 
-    def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
-        tool_cls = tool_from_dict(tool_definition)
+    async def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
         module = tool_definition.get("module")
-        key = f"{module}.{tool_cls.__name__}" if module else tool_cls.__name__
-        self.tools[key] = tool_cls()
-        logging.debug("Loaded tool %s", tool_definition)
+        name = tool_definition["name"]
+        key = f"{module}.{name}" if module else name
+        # Classes from one module share its globals and top-level side effects.
+        load_key = ("module", module) if module else ("inline", name)
+        lock = self._tool_load_locks.setdefault(load_key, asyncio.Lock())
+        async with lock:
+            if key in self.tools:
+                return
+
+            def build_tool() -> Tool:
+                return tool_from_dict(tool_definition)()
+
+            instance = await asyncio.to_thread(build_tool)
+            self.tools[key] = instance
+            logging.debug("Loaded tool %s", tool_definition)
 
     async def _handle_rpc_request(self, request: RPCRequest, _: int) -> Any:
         if "." not in request["method"]:
@@ -612,17 +647,20 @@ class Protocol(BaseProtocol):
             logging.warning("RPC response %r packet not found in futures", packet_id)
             return
         future = self.futures.pop(packet_id)
-        future.set_result(response)
+        if not future.done():
+            future.set_result(response)
 
     async def _handle_exception(self, exception: Exception, packet_id: int) -> None:
         if packet_id not in self.futures:
             logging.warning("Exception response %r packet not found in futures: %s", packet_id, exception)
             return
         future = self.futures.pop(packet_id)
-        future.set_exception(exception)
+        if not future.done():
+            future.set_exception(exception)
 
     @staticmethod
     async def _handle_log(record: LogRecord, _: int) -> None:
+        """Deliver a remote record to local handlers in the protocol loop thread."""
         logger = logging.getLogger(f"rmote.remote.{record['name']}")
         log_record = logging.LogRecord(
             name=record["name"],
@@ -633,6 +671,7 @@ class Protocol(BaseProtocol):
             args=record["args"],
             exc_info=record["exc_info"],
         )
+        log_record.exc_text = record.get("exc_text")
         logger.handle(log_record)
 
     def _execute(
@@ -655,14 +694,40 @@ class Protocol(BaseProtocol):
                 flags = Flags.EXCEPTION | Flags.RESPONSE
 
             if need_response:
-                await self.send(resp, flags, packet_id)
+                await self._send_response(resp, flags, packet_id)
 
         task = asyncio.create_task(wrapper())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def _send_response(self, response: Any, flags: Flags, packet_id: int) -> None:
+        """Send a response or a portable serialization error; close after a transport failure."""
+        try:
+            await self.send(response, flags, packet_id)
+        except Exception as error:
+            if self.writer.is_closing():
+                self._finish_pending(error)
+                return
+            # Serialization/compression failed before any bytes were written.
+            # Error text can itself be unsafe to format or pickle.
+            fallback = RuntimeError(f"Remote response serialization failed ({type(error).__name__})")
+            try:
+                await self.send(fallback, Flags.EXCEPTION | Flags.RESPONSE, packet_id)
+            except Exception as fallback_error:
+                self.writer.close()
+                self._finish_pending(fallback_error)
+
     async def wait_closed(self) -> None:
         await self._closed.wait()
+
+    def _finish_pending(self, error: Exception) -> None:
+        if self._close_error is None:
+            self._close_error = error
+        self._closed.set()
+        for future in self.futures.values():
+            if not future.done():
+                future.set_exception(self._close_error)
+        self.futures.clear()
 
     async def _loop(self) -> None:
         error: Exception | None = None
@@ -692,20 +757,31 @@ class Protocol(BaseProtocol):
         except Exception as e:
             error = e
         finally:
-            self._closed.set()
-            exc = error or ConnectionError("Remote process closed the connection")
-            for future in self.futures.values():
-                if not future.done():
-                    future.set_exception(exc)
-            self.futures.clear()
+            self._finish_pending(error or ConnectionError("Remote process closed the connection"))
 
     async def _call(self, payload: Any, flags: Flags) -> Any:
+        if self._closed.is_set():
+            raise self._close_error or ConnectionError("Connection closed")
         logging.debug("Call %r %s", flags, payload)
         packet_id = self.get_id()
         future = self.loop.create_future()
         self.futures[packet_id] = future
-        await self.send(payload, flags, packet_id)
-        return await future
+        try:
+            await self.send(payload, flags, packet_id)
+            return await future
+        except BaseException as error:
+            if self.writer.is_closing():
+                self._finish_pending(
+                    error if isinstance(error, Exception) else ConnectionError("Packet send interrupted")
+                )
+            raise
+        finally:
+            self.futures.pop(packet_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # A receive/close error can arrive while send is still pending.
+                future.exception()
 
     @overload
     async def __call__(self, tool: Callable[P, Coroutine[Any, Any, R]], *args: P.args, **kwargs: P.kwargs) -> R: ...
@@ -714,6 +790,9 @@ class Protocol(BaseProtocol):
     async def __call__(self, tool: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R: ...
 
     async def __call__(self, tool: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return await self._call_tool(tool, *args, **kwargs)
+
+    async def _call_tool(self, tool: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         tool_class = getattr(tool, "__tool_class__", None)
         # For classmethods/staticmethods, check __func__ if __tool_class__ not found on the method itself
         if tool_class is None and hasattr(tool, "__func__"):
@@ -721,8 +800,11 @@ class Protocol(BaseProtocol):
         if tool_class is None:
             raise ValueError("Only methods of Tool classes can be called with call_tool()")
         if tool_class not in self._tools_cache:
-            await self._call(tool_to_dict(tool_class), Flags.SYNC | Flags.REQUEST)
-            self._tools_cache.add(tool_class)
+            lock = self._tool_sync_locks.setdefault(tool_class, asyncio.Lock())
+            async with lock:
+                if tool_class not in self._tools_cache:
+                    await self._call(tool_to_dict(tool_class), Flags.SYNC | Flags.REQUEST)
+                    self._tools_cache.add(tool_class)
         # Use module-qualified name for file-based tools to avoid collisions
         # when different modules define tools with the same class name.
         # Inline tools (qualname contains <locals>) use bare class name.
@@ -744,18 +826,41 @@ class RemoteLogHandler(logging.Handler):
         self.loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
+        exc_text = record.exc_text
+        if record.exc_info and not exc_text:
+            formatter = self.formatter or logging.Formatter()
+            exc_text = formatter.formatException(record.exc_info)
         record_dict = LogRecord(
             name=record.name,
             levelno=record.levelno,
             levelname=record.levelname,
             pathname=record.pathname,
             lineno=record.lineno,
-            msg=record.msg,
-            args=record.args,
-            exc_info=record.exc_info,
+            msg=record.getMessage(),
+            args=(),
+            exc_info=None,
+            exc_text=exc_text,
         )
-        # LOG packets use negative IDs to avoid conflicts with RPC packet_ids
-        self.loop.create_task(self.protocol.send(record_dict, Flags.LOG, self.protocol.get_log_id()))
+
+        async def send_record() -> None:
+            try:
+                # LOG IDs use the upper end of the unsigned packet ID field.
+                await self.protocol.send(record_dict, Flags.LOG, self.protocol.get_log_id())
+            except Exception:
+                self.handleError(record)
+
+        def schedule() -> None:
+            if self.protocol._closed.is_set():
+                return
+            task = self.loop.create_task(send_record())
+            self.protocol._tasks.add(task)
+            task.add_done_callback(self.protocol._tasks.discard)
+
+        # Synchronous Tool methods emit records from executor threads.
+        try:
+            self.loop.call_soon_threadsafe(schedule)
+        except RuntimeError:
+            self.handleError(record)
 
 
 async def run() -> None:

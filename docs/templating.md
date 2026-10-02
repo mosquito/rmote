@@ -1,19 +1,16 @@
 # Templating
 
-## Motivation
+Use `Template` to render configuration text with Python expressions and control
+flow. It is available locally and in remote tools without an extra package.
+The {doc}`quickstart` uses it to create a systemd service unit.
 
-rmote's core constraint is **zero remote dependencies** - only the Python stdlib is available on
-the other side.  This rules out Jinja2, Mako, and every other templating library you might reach
-for on a normal project.
+Render locally when all values are known to the client. Render in a remote
+tool when values come from that host. You can also use another template engine
+locally and send the resulting string to the target.
 
-The built-in engine is intentionally minimal.  It covers exactly what is needed to generate config
-files and scripts during remote bootstrapping: variable interpolation and basic Python control flow.
-Nothing more.  If your use-case calls for filters, template inheritance, macros, or auto-escaping,
-use a real templating library locally and pass the already-rendered string to the remote side.
-
-The engine lives entirely inside `protocol.py`, which is the compressed payload injected into the
-remote interpreter.  This means `Template` instances are available on both sides without any extra
-sync step and are picklable, so they can be passed as arguments to remote tool calls directly.
+Templates execute Python expressions and statements. Treat their source as
+trusted code. Values are not escaped for shells, HTML, or configuration formats;
+validate or escape values for the format you generate.
 
 ## Template Syntax
 
@@ -133,13 +130,13 @@ assert tmpl.render(value=42) == "result: 42"
 
 ## The `Template` Class
 
-`Template` compiles the template string once and caches the render function.
-Repeated calls with the same template string are free - the compiled function
-is reused.
+`Template` caches compiled render functions by source text within each process.
+A matching cache entry avoids compilation; every `render()` call still executes
+the function with the supplied values.
 
-`Template` instances are **picklable**.  They store only the original template
-string, so they can be passed directly as arguments to remote tool calls over
-the protocol without recompiling on the remote side.
+Pickling stores the template source, not the compiled function. Unpickling
+constructs a `Template` in the receiving process. That process compiles the
+source unless it already has a matching cache entry.
 
 <!-- name: test_pickling -->
 ```python
@@ -153,9 +150,7 @@ restored = pickle.loads(data)
 assert restored.render(port=8080) == "port=8080"
 ```
 
-A practical use-case is generating config files.  The template is compiled
-locally, pickled, sent to the remote process, and rendered there with
-host-specific variables - all without shipping Jinja2 or Mako to the remote:
+For example, render an nginx configuration locally before sending it to a host:
 
 <!-- name: test_nginx_vhost -->
 ```python
@@ -172,9 +167,9 @@ server {
     }
 }""")
 
-rendered = vhost.render(port=443, hostname="example.com", backend_port=8080)
+rendered = vhost.render(port=8080, hostname="example.com", backend_port=9000)
 assert "server_name example.com;" in rendered
-assert "proxy_pass http://127.0.0.1:8080;" in rendered
+assert "proxy_pass http://127.0.0.1:9000;" in rendered
 assert "## nginx vhost" not in rendered
 ```
 
@@ -211,8 +206,19 @@ three ways to supply a template:
 |-------------------------------|---------------------|-----------------------------------|
 | `render(template, **kw)`      | template string     | template is short / dynamic       |
 | `render_file(path, **kw)`     | path on remote FS   | template lives on the remote host |
-| `render_compiled(tmpl, **kw)` | `Template` instance | template was compiled locally     |
+| `render_compiled(tmpl, **kw)` | `Template` instance | reuse a template object           |
 
-The methods execute on the remote process - call them through a `Protocol`
-instance as with any other tool.  See {doc}`api/tools/template` for the full
-method reference.
+Call these methods through either client. This example renders in a separate
+Python process; use `Connection.from_ssh` to render on an SSH host:
+
+<!-- name: test_remote_template; fixtures: client_resources; mark: timeout(15) -->
+```python
+from rmote.sync import Connection
+from rmote.tools import Template as RemoteTemplate
+
+with Connection.from_local() as remote:
+    rendered = remote(RemoteTemplate.render, "port=${port}", port=8080)
+    assert rendered == "port=8080"
+```
+
+See {doc}`api/tools/template` for the method reference.

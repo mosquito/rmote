@@ -23,13 +23,13 @@ class Package:
     version: str = ""
 
     @classmethod
-    def parse(cls, s: str | object, state: State | int = State.PRESENT) -> "Package":
-        coerced = State(state)
+    def parse(cls, s: str | object, state: State | int | None = None) -> "Package":
+        """Use the explicit state, then Package.state, then PRESENT."""
         if isinstance(s, cls):
-            return cls(name=s.name, version=s.version, state=s.state)
+            return cls(name=s.name, version=s.version, state=State(s.state if state is None else state))
         if not isinstance(s, str):
             raise TypeError(f"Expected str or Package, got {type(s).__name__!r}")
-        return cls.from_string(s, state=coerced)
+        return cls.from_string(s, state=State.PRESENT if state is None else State(state))
 
     @classmethod
     def from_string(cls, s: str, state: State = State.PRESENT) -> "Package":
@@ -108,8 +108,6 @@ class Backend:
 class Apt(Tool):
     """Manage Debian/Ubuntu packages via apt-get. Requires root on the remote host."""
 
-    _status: ClassVar[Mapping[str, Mapping[str, str]] | None] = None
-
     @staticmethod
     def update(ttl: int | float = -1) -> bool:
         """Run ``apt-get update``, with optional TTL-based skipping.
@@ -140,7 +138,7 @@ class Apt(Tool):
         return True
 
     @classmethod
-    def package(cls, package: str | Package, state: State | int = State.PRESENT) -> Result:
+    def package(cls, package: str | Package, state: State | int | None = None) -> Result:
         """Install, remove, or upgrade a single package.
 
         Args:
@@ -149,6 +147,8 @@ class Apt(Tool):
             state: Desired state - :attr:`State.PRESENT` (install if absent),
                 :attr:`State.ABSENT` (purge if installed), or
                 :attr:`State.LATEST` (install or upgrade to candidate version).
+                An explicit state overrides Package.state. If omitted, use
+                Package.state for objects or PRESENT for strings.
 
         Returns:
             :class:`Result` with the package name, installed version, and
@@ -158,12 +158,9 @@ class Apt(Tool):
             RuntimeError: If the underlying ``apt-get`` invocation fails.
         """
         package = Package.parse(package, state=state)
+        state = State(package.state)
 
-        if cls._status is None:
-            status = Backend.read_status()
-        else:
-            status = cls._status
-
+        status = Backend.read_status()
         info = status.get(package.name, {})
         installed = info.get("Status", "") == "install ok installed"
         version = info.get("Version", "")
@@ -205,7 +202,7 @@ class Apt(Tool):
 
     @classmethod
     def converge(cls, *packages: str | Package) -> list[Result]:
-        """Ensure all *packages* are present, reading dpkg status once for efficiency.
+        """Apply each Package.state; string arguments default to PRESENT.
 
         Args:
             *packages: Package names, ``name=version`` strings, or
@@ -215,5 +212,4 @@ class Apt(Tool):
             List of :class:`Result` objects, one per package, in the same order
             as the input.
         """
-        cls._status = Backend.read_status()
         return [cls.package(pkg) for pkg in packages]

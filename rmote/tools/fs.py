@@ -35,7 +35,7 @@ class FileSystem(Tool):
 
     @staticmethod
     def read_str(path: str) -> str:
-        """Read *path* and return its contents decoded as UTF-8.
+        """Read *path* using the remote Python process's default text encoding.
 
         Args:
             path: Absolute or relative path on the remote filesystem.
@@ -54,7 +54,7 @@ class FileSystem(Tool):
             pattern: Glob pattern relative to *path* (e.g. ``"*.conf"``).
 
         Returns:
-            Sorted list of matching paths as strings.
+            Matching paths as strings, with no guaranteed order.
         """
         return list(map(str, Path(path).glob(pattern)))
 
@@ -71,8 +71,8 @@ class FileSystem(Tool):
         """Ensure *line* is present in the file at *path*, idempotently.
 
         If *regexp* is given, replace the first (or all, with ``match=ALL``) lines that
-        match the pattern with *line*.  If no line matches, or if *regexp* is not given
-        and *line* is not found, *line* is appended.
+        match the pattern with *line*. If no pattern matches, append *line* only
+        when it is absent. Without *regexp*, append *line* only when it is absent.
 
         Args:
             path: Path to the file to modify.
@@ -80,7 +80,7 @@ class FileSystem(Tool):
             regexp: A regex pattern to match against existing lines.  When a match is
                 found, the matching line(s) are replaced with *line*.
             strip: Compare lines after stripping whitespace when looking for an exact
-                match (no *regexp*).  Default ``True``.
+                match, including when *regexp* has no matches. Default ``True``.
             create: Create the file if it does not exist.  Default ``False``.
             match: Whether to replace the :attr:`~LineInFileMatch.FIRST` matching line
                 or :attr:`~LineInFileMatch.ALL` matching lines.
@@ -111,13 +111,12 @@ class FileSystem(Tool):
                     replaced += 1
                     if match == LineInFileMatch.FIRST:
                         break
-        else:
+        if not replaced:
             target = line.strip() if strip else line
             for file_line in lines:
                 if (file_line.strip() if strip else file_line) == target:
                     return ""  # already present
 
-        if not replaced:
             lines.append(line)
 
         trailing = "\n" if original.endswith("\n") else ""

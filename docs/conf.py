@@ -1,7 +1,11 @@
+import tomllib
+from pathlib import Path
+
 project = "rmote"
 copyright = "2024, rmote contributors"
 author = "rmote contributors"
-release = "0.1.0"
+with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as metadata_file:
+    release = tomllib.load(metadata_file)["project"]["version"]
 
 extensions = [
     "sphinx.ext.autodoc",

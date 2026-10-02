@@ -1,6 +1,10 @@
 Apt
 ===
 
+Manage Debian or Ubuntu packages with ``apt-get`` as root. Refresh the
+package index with ``update`` before installing a package.
+See :doc:`../../quickstart` for installation and repeated-run checks.
+
 .. autoclass:: rmote.tools.apt.State
    :members:
    :show-inheritance:
