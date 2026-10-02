@@ -18,7 +18,7 @@ from functools import cache
 from lzma import compress, decompress
 from pathlib import Path
 from types import FunctionType
-from typing import Any, ParamSpec, Self, TypedDict, TypeVar, cast, overload
+from typing import Any, NotRequired, ParamSpec, Self, TypedDict, TypeVar, cast, overload
 
 
 class Template:
@@ -203,6 +203,7 @@ class LogRecord(TypedDict):
     msg: str
     args: Any
     exc_info: Any
+    exc_text: NotRequired[str | None]
 
 
 def bootstrap_packer(code: bytes) -> bytes:
@@ -670,6 +671,7 @@ class Protocol(BaseProtocol):
             args=record["args"],
             exc_info=record["exc_info"],
         )
+        log_record.exc_text = record.get("exc_text")
         logger.handle(log_record)
 
     def _execute(
@@ -824,6 +826,10 @@ class RemoteLogHandler(logging.Handler):
         self.loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
+        exc_text = record.exc_text
+        if record.exc_info and not exc_text:
+            formatter = self.formatter or logging.Formatter()
+            exc_text = formatter.formatException(record.exc_info)
         record_dict = LogRecord(
             name=record.name,
             levelno=record.levelno,
@@ -832,7 +838,8 @@ class RemoteLogHandler(logging.Handler):
             lineno=record.lineno,
             msg=record.getMessage(),
             args=(),
-            exc_info=record.exc_info,
+            exc_info=None,
+            exc_text=exc_text,
         )
 
         async def send_record() -> None:
