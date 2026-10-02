@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import tokenize
 from collections.abc import Callable, Coroutine
 from functools import cache
 from lzma import compress, decompress
@@ -58,7 +59,8 @@ class Template:
         """Split *line* into ``(is_expr, fragment)`` pairs.
 
         Handles ``\\${`` escape (→ literal ``${``), bare ``$`` (literal),
-        and nested ``{}`` inside expressions via brace-depth counting.
+        and nested ``{}`` inside expressions. Python string tokens do not
+        change the brace depth.
         """
         result: list[tuple[bool, str]] = []
         buf: list[str] = []
@@ -76,20 +78,25 @@ class Template:
                     buf = []
                 i += 2  # consume '${'
                 depth = 1
-                expr: list[str] = []
-                while i < n and depth > 0:
-                    ch = line[i]
-                    if ch == "{":
-                        depth += 1
-                        expr.append(ch)
-                    elif ch == "}":
-                        depth -= 1
-                        if depth > 0:
-                            expr.append(ch)
+                start = i
+                try:
+                    tokens = tokenize.generate_tokens(io.StringIO(line[start:]).readline)
+                    for token in tokens:
+                        if token.type != tokenize.OP:
+                            continue
+                        if token.string == "{":
+                            depth += 1
+                        elif token.string == "}":
+                            depth -= 1
+                            if depth == 0:
+                                end = start + token.start[1]
+                                result.append((True, line[start:end]))
+                                i = end + 1
+                                break
                     else:
-                        expr.append(ch)
-                    i += 1
-                result.append((True, "".join(expr)))
+                        raise SyntaxError("Unclosed template expression")
+                except tokenize.TokenError as exc:
+                    raise SyntaxError("Invalid template expression") from exc
             else:
                 buf.append(line[i])
                 i += 1
