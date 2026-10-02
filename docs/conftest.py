@@ -24,6 +24,7 @@ def quickstart_container(
     import os
     import shutil
     import subprocess
+    import time
     import uuid
 
     if request.config.getoption("--no-docker", default=False):
@@ -65,15 +66,29 @@ def quickstart_container(
             check=True,
             timeout=30,
         )
-        boot = subprocess.run(
-            [docker, "exec", container, "systemctl", "is-system-running", "--wait"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # Container-only unit failures can mark the host degraded; systemd must
-        # nevertheless finish booting and accept real service operations.
-        assert boot.stdout.strip() in {"running", "degraded"}, boot.stdout + boot.stderr
+        # Docker can accept exec before systemd creates its bus socket.
+        # Poll without --wait so early boot states also use the same deadline.
+        deadline = time.monotonic() + 30
+        while True:
+            boot = subprocess.run(
+                [docker, "exec", container, "systemctl", "is-system-running"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            # Container-only unit failures can mark a usable host degraded.
+            if boot.stdout.strip() in {"running", "degraded"}:
+                break
+            if time.monotonic() >= deadline:
+                logs = subprocess.run([docker, "logs", container], capture_output=True, text=True, timeout=5)
+                pytest.fail(
+                    "Container systemd did not finish booting within 30 seconds:\n"
+                    + boot.stdout
+                    + boot.stderr
+                    + logs.stdout
+                    + logs.stderr
+                )
+            time.sleep(0.1)
         yield container
     finally:
         sys.modules.pop("cache_tools", None)
