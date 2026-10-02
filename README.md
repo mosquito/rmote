@@ -5,7 +5,7 @@
 [![PyPI Version](https://img.shields.io/pypi/v/rmote.svg)](https://pypi.org/project/rmote/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/rmote.svg)](https://pypi.org/project/rmote/)
 [![Tests](https://github.com/mosquito/rmote/actions/workflows/tests.yml/badge.svg)](https://github.com/mosquito/rmote/actions/workflows/tests.yml)
-[![Docs](https://readthedocs.org/projects/rmote/badge/?version=latest)](https://rmote.readthedocs.io)
+[![Docs](https://github.com/mosquito/rmote/actions/workflows/docs.yml/badge.svg)](https://docs.rmote.org)
 
 rmote runs Python functions on another machine over SSH. Use its built-in tools
 to manage files, packages, and services, or write a tool for your application.
@@ -46,19 +46,19 @@ The file is read on the target, with the SSH user's permissions. The `with`
 block closes the connection. `Connection.from_local()` runs the same tools
 in a local subprocess; async applications use `rmote.protocol.Protocol`.
 
-The [quickstart](https://rmote.readthedocs.io/en/latest/quickstart.html) walks
+The [quickstart](https://docs.rmote.org/quickstart.html) walks
 through deploying Redis to a Docker container: install its package, render a
 systemd unit, start the service, and verify it. Switching to SSH changes only
 the connector.
 
 ## Guides
 
-- [Writing tools](https://rmote.readthedocs.io/en/latest/writing-tools.html): define a remote operation and return Python data.
-- [Multiple hosts](https://rmote.readthedocs.io/en/latest/multi-host.html): run operations concurrently and handle individual failures.
-- [Templates](https://rmote.readthedocs.io/en/latest/templating.html): render configuration files.
-- [Built-in tools](https://rmote.readthedocs.io/en/latest/api/tools/index.html): files, commands, packages, services, users, and logging.
-- [Connection reference](https://rmote.readthedocs.io/en/latest/api/sync.html): SSH options, deadlines, and cleanup.
-- [Execution model](https://rmote.readthedocs.io/en/latest/concepts.html): code transfer, state, concurrency, and cancellation.
+- [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
+- [Multiple hosts](https://docs.rmote.org/multi-host.html): run operations concurrently and handle individual failures.
+- [Templates](https://docs.rmote.org/templating.html): render configuration files.
+- [Built-in tools](https://docs.rmote.org/api/tools/index.html): files, commands, packages, services, users, and logging.
+- [Connection reference](https://docs.rmote.org/api/sync.html): SSH options, deadlines, and cleanup.
+- [Execution model](https://docs.rmote.org/concepts.html): code transfer, state, concurrency, and cancellation.
 
 Use rmote only with trusted hosts and tool code. It transfers executable Python
 and uses pickle for results. A timeout stops local waiting; it does not cancel
@@ -76,5 +76,5 @@ Some integration tests require Docker; SSH tests need local OpenSSH binaries.
 Use `uv run pytest --no-docker` to exclude Docker tests. Named documentation
 examples run through `markdown-pytest` alongside the Python tests.
 
-rmote is beta software. See the [release notes](https://rmote.readthedocs.io/en/latest/release-notes.html)
+rmote is beta software. See the [release notes](https://docs.rmote.org/release-notes.html)
 for changes and compatibility. Licensed under [Apache 2.0](LICENSE).

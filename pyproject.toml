@@ -27,7 +27,7 @@ license = { file = "LICENSE" }
 [project.urls]
 Homepage = "https://github.com/mosquito/rmote"
 Repository = "https://github.com/mosquito/rmote"
-Documentation = "https://rmote.readthedocs.io"
+Documentation = "https://docs.rmote.org"
 "Bug Tracker" = "https://github.com/mosquito/rmote/issues"
 
 [build-system]
