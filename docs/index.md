@@ -6,7 +6,7 @@
 ![typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-blue?style=flat-square)
 [![GitHub](https://img.shields.io/badge/GitHub-mosquito%2Frmote-181717?style=flat-square&logo=github)](https://github.com/mosquito/rmote)
 
-**Asyncio RPC for remote Python processes that have nothing installed.**
+**Synchronous and asynchronous RPC for remote Python processes with only the standard library.**
 
 ## Motivation
 
@@ -19,8 +19,8 @@ writes it to the remote's stdin, and has the remote interpreter execute it direc
 process needs only the Python standard library.
 
 Once connected, you interact with the remote host by writing ordinary Python classes - not YAML
-files, not shell scripts, not JSON-RPC stubs. Methods are async-native, return values are typed
-dataclasses, and multiple in-flight calls execute concurrently on both sides.
+files, not shell scripts, not JSON-RPC stubs. Both client interfaces can call synchronous and asynchronous Tool methods.
+Return values can include typed dataclasses, and multiple calls can be in flight.
 
 ## Prior Art
 
@@ -93,7 +93,31 @@ sequenceDiagram
     R-->>L: RESPONSE {result, packet_id}
 ```
 
-## Quick Example
+## Choose a Client
+
+Use {class}`~rmote.sync.Connection` for ordinary scripts and
+{class}`~rmote.protocol.Protocol` inside an async application. Both interfaces
+use the same tools, remote bootstrap, and wire protocol.
+
+A synchronous local example:
+
+<!-- name: test_sync_overview; fixtures: client_resources; marks: timeout(15) -->
+```python
+from rmote.sync import Connection
+from rmote.tools import FileSystem
+
+with Connection.from_local(rpc_timeout=5.0) as remote:
+    first = remote(FileSystem.glob, "/", "*")
+    second = remote(FileSystem.glob, "/", "*")
+    assert isinstance(first, list) and isinstance(second, list)
+```
+
+The factory returns after the handshake. The context closes its process and
+private background loop thread. Use `Connection.from_ssh("user@host")` for SSH.
+See {doc}`quickstart` for both client styles, deadlines, and errors, and
+{doc}`writing-tools` for a shared Tool module with separate client scripts.
+
+## Asynchronous SSH Example
 
 <!-- name: test_quick_example -->
 ```python
@@ -152,14 +176,14 @@ pip install rmote
 
 ## Project Status
 
-**Version: 0.2.0** — Beta. Semver: patch releases fix bugs, minor releases add tools or protocol
+**Beta.** Semver: patch releases fix bugs, minor releases add tools or protocol
 features, major releases indicate breaking wire or API changes.
 
 ### Tests
 
 The project ships an extensive test suite across three layers:
 
-**Protocol layer** (`tests/` — 7 files):
+**Protocol layer** (`tests/`):
 
 - `test_protocol.py` — tool serialization round-trips, sync and async RPC calls, response
   matching by `packet_id`.
@@ -176,7 +200,7 @@ The project ships an extensive test suite across three layers:
 - `test_tool_metaclass.py` — `ToolMeta` AST import extraction, class variable collection,
   `__init__` prohibition.
 
-**Tool layer** (`tests/tools/` — 11 files, all run against live processes):
+**Tool layer** (`tests/tools/`; integration tests run against live processes):
 
 - `test_fs.py` — `FileSystem` unit tests (local) plus remote round-trips via the `protocol`
   fixture.
@@ -190,7 +214,7 @@ The project ships an extensive test suite across three layers:
 - `test_integration.py` — cross-tool interactions: concurrent `FileSystem` reads, mixed
   built-in + custom tool calls in a single session, error propagation through `asyncio.gather`.
 
-**Tool fixtures** (`tests/tools_cases/` — 12 Tool subclass definitions):
+**Tool fixtures** (`tests/tools_cases/`):
 
 Reusable fixtures shared across test files, each targeting a specific serialization or type
 scenario: async methods, class-level constants, dataclass returns, nested dataclasses, enums
@@ -198,8 +222,8 @@ defined inside and outside the class, JSON-serializable types, math operations, 
 imports, tool inheritance, user-lookup patterns.
 
 **Documentation examples** — `pytest` discovers `README.md` and all files under `docs/` as test
-sources. Every named code block is executed by `markdown-pytest` so all published snippets are
-verified on each commit.
+sources. Named local examples execute real subprocess RPCs. Selected SSH examples
+use an isolated local SSH server when its executables are available.
 
 ### Docker transport
 
@@ -216,13 +240,14 @@ Python 3.11, 3.12, 3.13, and 3.14.
 
 ### What is stable
 
-Core protocol, SSH transport, subprocess transport, all 11 built-in tools, templating engine,
-concurrent multi-host fan-out, Docker-based testing infrastructure.
+Core protocol, synchronous and asynchronous clients, SSH and subprocess transports,
+all 11 built-in tools, templating, concurrent calls, and Docker-based tests.
 
 ### Not yet supported
 
 Windows remote hosts, raw socket / TLS transports, `Protocol.from_docker` public API, streaming
-or generator responses.
+or generator responses. The synchronous client does not provide a shared runtime,
+automatic reconnect, or remote cancellation.
 
 ```{toctree}
 :maxdepth: 2
@@ -233,6 +258,13 @@ multi-host
 concepts
 writing-tools
 templating
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Releases
+
+release-notes
 ```
 
 ```{toctree}

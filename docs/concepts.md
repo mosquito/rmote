@@ -1,5 +1,67 @@
 # Concepts
 
+## Client Interfaces and Resource Ownership
+
+The synchronous {class}`~rmote.sync.Connection` wraps the same asynchronous
+{class}`~rmote.protocol.Protocol` used by async applications. Tool serialization,
+packet framing, and remote execution are shared. The remote bootstrap does not
+include the synchronous client or its background runtime.
+
+```{mermaid}
+flowchart LR
+    S["Synchronous caller threads"] --> B["Connection: private background loop"]
+    A["Async application loop"] --> P["Protocol"]
+    B --> P
+    P <-->|"Existing packet stream"| R["Remote Protocol and Tool methods"]
+```
+
+| Resource | Synchronous `Connection` | Async `Protocol` |
+|---|---|---|
+| Local event loop | Private loop in one background thread | Application's running loop |
+| Subprocess | Owned by the connection | `from_ssh` owns SSH; `from_subprocess` leaves ownership with its caller |
+| Handshake | Completed before a factory returns | Completed when entering the protocol context |
+| Cleanup | `with` or explicit `close()` | `async with`, plus cleanup for caller-owned processes |
+
+One synchronous connection owns one subprocess, protocol, and background thread.
+There is no global or shared runtime. Multiple external threads can call one
+open connection; results are matched by request ID. Do not close it until its
+callers finish unless you intend to interrupt their pending requests.
+
+The synchronous factories clean up failed or interrupted startup. Context exit
+closes the connection on success, operation failure, or `KeyboardInterrupt`.
+Explicit `close()` rejects new calls, closes the channel, reaps its process, and
+joins the thread. Repeated close is safe. Nested context entry and operations
+after closing raise `RuntimeError`.
+
+See {doc}`quickstart` for both client styles and {doc}`api/sync` for exact deadlines.
+
+## Cancellation and Logging
+
+Synchronous RPC deadlines include first Tool upload, packet transmission, and
+response waiting. Timeout raises `TimeoutError`; `KeyboardInterrupt` propagates.
+Both cancel local waiting and remove the pending request. Async callers can use
+`asyncio.timeout` around an operation to request the same local cancellation.
+
+Local cancellation does not cancel remote work. No remote cancellation packet
+is sent. Remote side effects can still occur. Late responses for cancelled or
+unknown request IDs are ignored. Cancellation while sending a packet can leave
+an incomplete frame and close the channel. A transport failure requires closing
+the connection and creating another; automatic reconnect is not available.
+
+The close deadline limits graceful process shutdown. Cleanup then uses terminate,
+a one-second grace period, and kill. Total cleanup can take longer because
+local cancellation and executor shutdown require cooperative code.
+
+Remote log records invoke local logging handlers in the connection's background
+loop thread. Keep handlers thread safe. A handler must not call synchronous
+methods of that connection; these calls raise `RuntimeError` from its own loop
+thread. The loop remains active between RPCs, so background events can arrive
+while the caller is idle.
+
+Use `Protocol` in async applications. Alternatively, use `asyncio.to_thread`
+for the complete synchronous lifecycle. A direct synchronous call blocks the
+calling loop. Cancelling a `to_thread` await does not stop its worker thread.
+
 ## Bootstrap Flow
 
 When {meth}`~rmote.protocol.BaseProtocol.from_subprocess` is called, rmote injects its entire
@@ -78,10 +140,9 @@ Tools are transferred lazily and cached for the lifetime of the connection:
    use the bare class name. This means two Tool subclasses with the same class name in different
    modules are dispatched correctly — they occupy separate keys.
 
-6. **Cache** - The local `Protocol` instance maintains a `_tools_cache` set of already-synced
-   tool classes. Before every RPC call, `__call__` checks whether the tool class is in this set.
-   If it is not, steps 2–5 run and the class is added to the set; if it is, the SYNC is skipped
-   entirely and only the RPC packet is sent.
+6. **Cache** - The local `Protocol` caches loaded tools. Concurrent first calls
+   share a per-tool loading lock, so they do not duplicate a successful upload.
+   Later calls send only the RPC packet. The synchronous client uses the same cache.
 
 **Lazy** - No SYNC packets are sent when a connection is opened or when a Tool class is defined.
 The transfer happens the first time a method on that class is actually *called* through a given
@@ -100,8 +161,9 @@ rmote uses asyncio on both sides to handle multiple in-flight requests without b
 - A `asyncio.Future` is stored in `Protocol.futures` keyed by `packet_id`.
 - The `_loop` task continuously reads incoming packets. When a response arrives its
   `packet_id` is used to look up and resolve the corresponding future.
-- Remote-side handlers are wrapped in `asyncio.create_task`, so many RPC calls can
-  execute concurrently even if some block on I/O.
+- Remote-side handlers run as asyncio tasks. A `def` Tool method runs in a worker
+  thread; an `async def` method runs in the remote loop. Blocking work inside an
+  async method blocks that loop. See {doc}`writing-tools` for method selection.
 
 ```{mermaid}
 sequenceDiagram

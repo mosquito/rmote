@@ -1,44 +1,45 @@
+"""Run a local async client with explicit subprocess ownership."""
+
 import asyncio
-import asyncio.subprocess
 import logging
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from rmote import protocol
-from rmote.tools import Logger
-from rmote.tools.fs import FileSystem
+from rmote.protocol import Protocol
+from rmote.tools import FileSystem, Logger
 
 
 async def main() -> None:
-    # Spawn a local Python subprocess
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-
-    proto = await protocol.Protocol.from_subprocess(process)
-
-    async with proto:
-        # Set log level
-        await proto(Logger.set_log_level, "INFO")
-
-        # Log a message
-        await proto(Logger.log, "INFO", "Listing files in /tmp")
-
-        # Read files
-        files = await proto(FileSystem.glob, "/tmp", "*.txt")
-        print(f"Found {len(files)} .txt files in /tmp:")
-        for f in files[:10]:  # Limit to first 10
-            print(f"  {f}")
-
-        # Read a file if it exists
-        if files:
-            content = await proto(FileSystem.read_str, files[0])
-            print(f"\nFirst file content (truncated):\n{content[:200]}")
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "sample.txt"
+        path.write_text("hello\n", encoding="utf-8")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-qui",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with await Protocol.from_subprocess(process) as remote:
+                await remote(Logger.set_log_level, "INFO")
+                await remote(Logger.log, "INFO", "Reading a sample file")
+                files = await remote(FileSystem.glob, directory, "*.txt")
+                assert files == [str(path)]
+                content = await remote(FileSystem.read_str, str(path))
+                assert content == "hello\n"
+                print(content, end="")
+        finally:
+            # The caller owns the subprocess passed to from_subprocess.
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG, format="[%(levelname)s] - %(message)s")
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     asyncio.run(main())

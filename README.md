@@ -22,49 +22,131 @@ Python 3.11+ is required on the **local** side. The remote needs only a standard
 
 ## Quick Start
 
-Connect to a local subprocess and call remote methods:
+Use `Connection` for synchronous scripts and `Protocol` for async applications.
+Both clients call the same `def` and `async def` Tool methods.
 
-<!-- name: test_quickstart -->
+### Synchronous local process
+
+<!-- name: test_sync_quickstart; fixtures: client_resources; marks: timeout(15) -->
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from rmote.sync import Connection
+from rmote.tools import FileSystem
+
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "sample.txt"
+    path.write_text("hello\n", encoding="utf-8")
+    with Connection.from_local(rpc_timeout=5.0) as remote:
+        assert remote(FileSystem.read_str, str(path)) == "hello\n"
+        assert remote.call_with_timeout(2.0, FileSystem.read_str, str(path)) == "hello\n"
+```
+
+The factory completes the handshake before returning. Keep the connection open
+for repeated calls. The context closes its subprocess and background thread,
+including when an exception leaves the block.
+
+### Asynchronous local process
+
+<!-- name: test_quickstart; fixtures: client_resources; marks: timeout(15) -->
 ```python
 import asyncio
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from rmote.protocol import Protocol
-from rmote.tools.fs import FileSystem
+from rmote.tools import FileSystem
 
 
-async def main():
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async with await Protocol.from_subprocess(process) as proto:
-        content = await proto(FileSystem.read_str, "/etc/hostname")
-        print(content)
+async def main() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "sample.txt"
+        path.write_text("hello\n", encoding="utf-8")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-qui",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with await Protocol.from_subprocess(process) as remote:
+                assert await remote(FileSystem.read_str, str(path)) == "hello\n"
+                assert await remote(FileSystem.read_str, str(path)) == "hello\n"
+        finally:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
-For SSH, replace `from_subprocess` with `from_ssh`:
+The caller owns the process passed to `from_subprocess` and must reap it.
+`Protocol.from_ssh` owns its SSH subprocess.
 
-<!-- name: test_ssh_quickstart -->
+### SSH
+
+For a synchronous script:
+
+<!-- name: test_ssh_sync_quickstart; fixtures: docs_ssh; marks: timeout(20) -->
+```python
+from rmote.sync import Connection
+from rmote.tools import FileSystem
+
+with Connection.from_ssh("user@server", rpc_timeout=10.0) as remote:
+    print(remote(FileSystem.glob, "/", "*"))
+```
+
+For an async application:
+
+<!-- name: test_ssh_quickstart; fixtures: docs_ssh; marks: timeout(20) -->
 ```python
 import asyncio
 from rmote.protocol import Protocol
 from rmote.tools import FileSystem
 
 
-async def main():
-    async with await Protocol.from_ssh("user@server") as proto:
-        content = await proto(FileSystem.read_str, "/etc/hostname")
-        print(content)
+async def main() -> None:
+    async with await Protocol.from_ssh("user@server") as remote:
+        print(await remote(FileSystem.glob, "/", "*"))
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
+
+Both factories accept `user`, `port`, `identity`, `python`, `ssh_options`, and
+`stderr`. The synchronous factory also accepts `connect_timeout`, `rpc_timeout`,
+and `close_timeout`. See the [quickstart](https://rmote.readthedocs.io/en/latest/quickstart.html)
+for SSH options, jump hosts, errors, and explicit cleanup.
+
+## Deadlines and Lifecycle
+
+`Connection.from_local()` and `Connection.from_ssh(...)` each own one subprocess
+and one private background event loop thread. Use `with` or `try/finally` with
+`close()`. Repeated `close()` is safe; calls after closing and nested context
+entry raise `RuntimeError`.
+
+`connect_timeout=30.0` limits startup and handshake. `rpc_timeout=None` sets the
+default for calls. `call_with_timeout(timeout, tool, /, *args, **kwargs)` overrides
+one call. Each RPC deadline includes the first Tool upload, send, and response.
+All keyword arguments belong to the remote method.
+
+Timeout raises `TimeoutError`. Timeout and `KeyboardInterrupt` stop local
+waiting; remote work can continue. Cancellation during packet transmission can
+break the channel. Close a failed connection and create another.
+
+`close_timeout=5.0` limits graceful shutdown before terminate, a one-second grace
+period, and kill. It does not bound total cleanup time: local cancellation and
+executor shutdown require cooperative code. Numeric deadlines must be finite
+and positive; only connect and RPC deadlines accept `None`.
+
+Use `Protocol` in async code, or put the complete synchronous lifecycle inside
+`asyncio.to_thread`. Direct synchronous calls block the caller's event loop.
+Remote log records invoke local handlers in the background loop thread. Handlers
+must be thread safe and must not call that connection's synchronous methods.
 
 ## How It Works
 
@@ -92,70 +174,22 @@ await proto(Tool.method) ───►  REQUEST {method, args, id=1}
 
 ## Writing Custom Tools
 
-A **Tool** is a Python class whose methods execute on the remote side. Define it locally; the source is transferred 
-automatically on first use.
+A Tool is a Python class whose methods run in the remote interpreter. Keep its
+definition and return types in an importable module. Put connections and local
+setup in a separate client script; the same Tool module works with both clients.
 
-<!-- name: test_custom_tool -->
-```python
-import dataclasses
-from rmote.protocol import Tool
+See [Writing Tools](https://rmote.readthedocs.io/en/latest/writing-tools.html)
+for module and inline examples, custom return types, imports, and serialization.
+Runnable clients are in [examples/local_sync.py](examples/local_sync.py) and
+[examples/local_async.py](examples/local_async.py), with their shared Tool in
+[examples/lifecycle_tools.py](examples/lifecycle_tools.py).
 
-
-@dataclasses.dataclass
-class DiskInfo:
-    path: str
-    free: int
-
-
-class SystemTool(Tool):
-    @staticmethod
-    def hostname() -> str:
-        import socket
-        return socket.gethostname()
-
-    @staticmethod
-    def disk_free(path: str = "/") -> "DiskInfo":
-        import shutil
-        _, _, free = shutil.disk_usage(path)
-        return DiskInfo(path=path, free=free)
-
-    @staticmethod
-    async def read(path: str) -> str:
-        with open(path) as f:
-            return f.read()
-```
-
-<!-- name: test_custom_tool -->
-```python
-import asyncio
-import sys
-from rmote.protocol import Protocol
-
-
-async def main():
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async with await Protocol.from_subprocess(process) as proto:
-        host = await proto(SystemTool.hostname)
-        info = await proto(SystemTool.disk_free, "/")
-        print(f"{host}: {info.free // 2**30} GB free on /")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-**Rules:**
-
-- Inherit from `Tool`
-- No `__init__` — the metaclass raises `TypeError` if defined
-- Static or class methods only — no instance state across calls
-- Stdlib imports only — put `import` statements inside the method body so they run on the remote
-- Any picklable value can be returned, including dataclasses
-- **Use `process()` for subprocesses** — never `subprocess.run` or `os.system` directly (see below)
+- Inherit from `Tool`; use static or class methods.
+- Do not define `__init__`; the metaclass raises `TypeError`.
+- Use `def` for blocking remote work and `async def` for awaitable work.
+- Remote imports must be available on the remote host. Built-in tools use the standard library.
+- Return serializable values and define custom types in the Tool module.
+- Use `process()` for subprocesses so children do not share protocol pipes.
 
 ### Running Subprocesses
 
@@ -211,33 +245,63 @@ if __name__ == "__main__":
 
 ## Concurrent Calls
 
+An open synchronous connection can accept calls from multiple caller threads:
+
+<!-- name: test_sync_concurrent; fixtures: client_resources; marks: timeout(15) -->
+```python
+from concurrent.futures import ThreadPoolExecutor
+from rmote.sync import Connection
+from rmote.tools import FileSystem
+
+with Connection.from_local(rpc_timeout=5.0) as remote:
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [pool.submit(remote, FileSystem.glob, "/", "*") for _ in range(2)]
+        results = [call.result() for call in calls]
+        assert all(isinstance(result, list) for result in results)
+```
+
+Keep the connection open until its caller threads finish. Each connection owns
+its private loop; a shared runtime is not available.
+
 Multiple RPC calls execute concurrently over the same connection via `asyncio.gather`:
 
-<!-- name: test_concurrent -->
+<!-- name: test_concurrent; fixtures: client_resources; marks: timeout(15) -->
 ```python
 import asyncio
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from rmote.protocol import Protocol
 from rmote.tools import FileSystem
 
 
-async def main():
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async with await Protocol.from_subprocess(process) as proto:
-        hosts, uptime = await asyncio.gather(
-            proto(FileSystem.read_str, "/etc/hosts"),
-            proto(FileSystem.read_str, "/etc/hostname"),
+async def main() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "sample.txt"
+        path.write_text("hello\n", encoding="utf-8")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-qui",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        print(hosts[:50])
-        print(uptime.strip())
+        try:
+            async with await Protocol.from_subprocess(process) as remote:
+                contents = await asyncio.gather(
+                    remote(FileSystem.read_str, str(path)),
+                    remote(FileSystem.read_str, str(path)),
+                )
+                assert contents == ["hello\n", "hello\n"]
+        finally:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
 Both calls are dispatched immediately — the channel does not wait for the first response before sending the second. 
@@ -317,10 +381,10 @@ HOSTS = ["web1", "web2", "web3"]
 
 async def main() -> None:
     async with AsyncExitStack() as stack:
-        protos = await asyncio.gather(*[
-            stack.enter_async_context(await Protocol.from_ssh(h))
-            for h in HOSTS
-        ])
+        protos = [
+            await stack.enter_async_context(await Protocol.from_ssh(host))
+            for host in HOSTS
+        ]
 
         # Round 1 — read hostnames (FileSystem synced once per connection)
         names = await asyncio.gather(*[
@@ -429,54 +493,72 @@ assert result == "Hi Bob, you have 3 messages."
 
 Exceptions raised on the remote side are re-raised locally with the original type:
 
-<!-- name: test_errors -->
+<!-- name: test_errors; fixtures: client_resources; marks: timeout(15) -->
 ```python
 import asyncio
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from rmote.protocol import Protocol
 from rmote.tools import FileSystem
 
 
-async def main():
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async with await Protocol.from_subprocess(process) as proto:
+async def main() -> None:
+    with TemporaryDirectory() as directory:
+        missing = str(Path(directory) / "missing.txt")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-qui",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
         try:
-            await proto(FileSystem.read_str, "/nonexistent/path/file.txt")
-        except FileNotFoundError as e:
-            print(f"caught: {e}")
+            async with await Protocol.from_subprocess(process) as remote:
+                try:
+                    await remote(FileSystem.read_str, missing)
+                except FileNotFoundError as error:
+                    print(f"caught: {error}")
+                else:
+                    raise AssertionError("The missing file must raise FileNotFoundError")
+                assert await remote(FileSystem.glob, directory, "*") == []
+        finally:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
 ## SSH Options
 
 All common SSH options are available as keyword arguments to `from_ssh`:
 
-<!-- name: test_ssh_options -->
+<!-- name: test_ssh_options; fixtures: docs_ssh; marks: timeout(20) -->
 ```python
+import asyncio
 from rmote.protocol import Protocol
+from rmote.tools import FileSystem
 
 
-async def main():
-    proto = await Protocol.from_ssh(
+async def main() -> None:
+    async with await Protocol.from_ssh(
         "myserver",
         user="deploy",
         port=2222,
-        identity="~/.ssh/id_ed25519",
+        identity="/home/deploy/.ssh/id_ed25519",
         python="python3.11",
-        ssh_options=["-o", "StrictHostKeyChecking=no"],
-    )
+        ssh_options=["-o", "BatchMode=yes"],
+    ) as remote:
+        files = await remote(FileSystem.glob, "/var/log", "*.log")
+        assert isinstance(files, list)
+        print(files)
 
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
 ## Built-in Tools
@@ -513,19 +595,19 @@ rather than JSON blobs.
 
 ## Project Status
 
-**Beta — version 0.2.0.** Semver: patch = bug fix, minor = new tool or protocol feature,
+**Beta.** Semver: patch = bug fix, minor = new tool or protocol feature,
 major = breaking wire or API change.
 
 ### Tests
 
 The test suite covers three layers:
 
-**Protocol** (7 test files) — tool serialization, sync and async RPC round-trips, concurrent
+**Protocol** — tool serialization, sync and async RPC round-trips, concurrent
 in-flight requests matched by `packet_id`, remote exception propagation with original type
 preservation, raw packet encoding/decoding, LZMA compression threshold, and a dedicated test
 that verifies spawning a subprocess inside a tool never corrupts the protocol pipes.
 
-**Tools** (11 test files, all run against live processes):
+**Tools** (integration tests run against live processes):
 
 - `FileSystem`, `Exec`, `Logger`, `Service`, `User`, `Template` — tested against a local
   subprocess.
@@ -536,14 +618,14 @@ that verifies spawning a subprocess inside a tool never corrupts the protocol pi
 - Cross-tool integration: concurrent reads, mixed built-in and custom tools in a single session,
   error propagation through `asyncio.gather`.
 
-**14 reusable `Tool` fixtures** in `tests/tools_cases/` cover the serialization corner cases:
+**Reusable `Tool` fixtures** in `tests/tools_cases/` cover the serialization corner cases:
 async methods, class-level constants, dataclass and nested-dataclass returns, enums defined
 inside and outside the class, module-level imports, tool inheritance, and same-name tools in
 different modules (name collision safety).
 
 **README and docs examples** — `pytest` treats `README.md` and all files under `docs/` as test
-sources. Every named code block is executed by `markdown-pytest`, so every snippet in this file
-is verified on each commit.
+sources. Named code blocks are collected by `markdown-pytest`. Local client examples execute
+real RPCs. SSH documentation examples use an isolated local SSH server when available.
 
 ### Docker transport
 

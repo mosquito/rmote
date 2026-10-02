@@ -1,304 +1,328 @@
 # Writing Tools
 
-A *Tool* is a Python class whose methods execute on the remote side.
-The class definition is serialized and transferred to the remote interpreter the first time any
-method on the class is called through a connection - not when the class is defined, and not when
-the connection is opened. This is called *lazy sync*.
+A *Tool* is a Python class whose methods execute in the remote interpreter.
+Define the class locally and pass a method to a client. The first call transfers
+the source; later calls reuse the loaded tool on that connection.
+A new connection loads the tool again on its first call.
 
-Once a tool has been synced over a connection, every subsequent call skips the transfer entirely:
-only the RPC packet (method name + arguments) is sent. If the connection is closed and a new one
-is opened, the class is re-synced on its first call through the new connection.
+The client interface and the remote method are separate choices. Both the
+synchronous `Connection` and the asynchronous `Protocol` can call `def` and
+`async def` methods. The same tool works with either client.
 
-## Rules
+## Define a Tool Module
 
-1. **Inherit from** {class}`~rmote.protocol.Tool`.
-2. **No** `__init__` - the metaclass raises `TypeError` if one is defined.
-3. **Static or class methods only** - instance state is not preserved across calls.
-4. **Stdlib imports only** - the remote side has no installed packages.
-5. **Import inside methods** - put `import` statements inside the method body so they
-   are executed on the remote interpreter, not the local one.
+Keep tool definitions in an importable `.py` module. Use a separate client script
+for connections and local setup. For example, save this module as `inventory.py`:
 
-## Name Collisions
-
-Tools are identified on the remote side by their **module-qualified name** (`module.ClassName`),
-not the bare class name.  Two Tool subclasses with the same class name in different modules work
-correctly — each is stored and dispatched independently.
-
-For example, suppose two modules both define a class called ``Helper``:
-
-<!-- name: test_name_collision -->
-```python
-from rmote.protocol import Tool
-
-
-# In a real project these would live in separate files,
-# e.g. tools/monitoring.py and tools/deploy.py
-
-class MonitoringHelper(Tool):
-    @staticmethod
-    def value() -> str:
-        return "monitoring"
-
-
-class DeployHelper(Tool):
-    @staticmethod
-    def value() -> str:
-        return "deploy"
-```
-
-Both can be used in the same session without conflict:
-
-<!-- name: test_name_collision -->
+<!-- name: test_inventory_module -->
 ```python
 import asyncio
-import sys
-from rmote.protocol import Protocol
-
-
-async def main() -> None:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async with await Protocol.from_subprocess(process) as proto:
-        result_m = await proto(MonitoringHelper.value)
-        result_d = await proto(DeployHelper.value)
-        assert result_m == "monitoring"
-        assert result_d == "deploy"
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Inline tools (defined inside a function body) use only the bare class name, so two inline tools
-with the same name in the same session will collide.  This is rarely an issue in practice.
-
-## Running Subprocesses
-
-The remote Python process communicates with the local side over its own **stdin / stdout** as a
-binary packet stream.  Any child process that inherits the default file descriptors will share
-those pipes, and anything the child writes to stdout - even a single byte - will corrupt the
-packet framing and break the connection permanently.
-
-```{danger}
-Never use ``subprocess.run``, ``subprocess.Popen``, or ``os.system`` directly inside a Tool
-method.  They inherit the parent's stdin/stdout by default, which are the protocol pipes.
-```
-
-Use {func}`rmote.protocol.process` instead.  It always sets ``stdin=DEVNULL`` and, unless
-``capture_output=True``, also redirects ``stdout`` and ``stderr`` to ``DEVNULL``:
-
-<!-- name: test_process_basic -->
-```python
-from rmote.protocol import Tool, process
-
-
-class DeployTool(Tool):
-    @staticmethod
-    def git_pull(repo: str) -> int:
-        """Pull latest changes; return the exit code."""
-        result = process("git", "-C", repo, "pull", "--ff-only")
-        return result.returncode
-
-    @staticmethod
-    def capture(cmd: str) -> str:
-        """Run a shell command and return its stdout."""
-        result = process(cmd, shell=True, capture_output=True, text=True, check=True)
-        return result.stdout
-```
-
-An *inline tool* is a Tool subclass defined in the same script or module that imports
-``Protocol``.  A *file-level tool* is defined in its own standalone module that is imported
-separately.
-
-``process`` is injected into every tool namespace automatically - no import is needed for inline
-tools.  For file-level tools add ``from rmote.protocol import process`` at the top of the file.
-
-### What `process` does
-
-| Default behaviour | Why |
-|---|---|
-| `stdin=DEVNULL` | Child cannot read protocol data |
-| `stdout=DEVNULL` (unless `capture_output=True`) | Child cannot corrupt the protocol stream |
-| `stderr=DEVNULL` (unless `capture_output=True`) | Remote stderr is also the protocol channel |
-
-The signature mirrors `subprocess.run` for everything else: `check`, `env`, `cwd`, `shell`, and
-an optional `stdin` argument (bytes or str) for data that should be piped *into* the child.
-
-### What not to do
-
-<!-- name: test_process_comparison -->
-```python
-import os
-import subprocess
-
-from rmote.protocol import process
-
-
-if __name__ == "__main__":
-   # BAD - child inherits the protocol pipes
-
-   subprocess.run(["apt-get", "update"])
-
-   # BAD - os.system goes through the shell which inherits the same fds
-   os.system("apt-get update")
-   
-   # GOOD
-   process("apt-get", "update")
-```
-
-## Sync and Async Methods
-
-Both sync and async methods are supported.
-The protocol detects the method type via `inspect.iscoroutinefunction` and dispatches
-accordingly:
-
-<!-- name: test_sync_async_methods -->
-```python
-import urllib.request
-from rmote.protocol import Tool
-
-
-class MyTool(Tool):
-    @staticmethod
-    def read_file(path: str) -> str:
-        """Synchronous - runs in a thread on the remote."""
-        with open(path) as f:
-            return f.read()
-
-    @staticmethod
-    async def fetch(url: str) -> bytes:
-        """Async - runs directly in the remote event loop."""
-        with urllib.request.urlopen(url) as resp:
-            return resp.read()
-```
-
-## Class Variables
-
-Class variables can hold configuration.
-Annotate them as `typing.ClassVar` to signal that they are not instance attributes:
-
-<!-- name: test_class_variables -->
-```python
+from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
+
 from rmote.protocol import Tool
 
 
-class Config(Tool):
-    base_url: ClassVar[str] = "https://example.com"
-
-    @classmethod
-    def get_url(cls, path: str) -> str:
-        return cls.base_url + path
-```
-
-(returning-custom-types)=
-## Returning Custom Types
-
-Any picklable object can be returned - including dataclasses:
-
-<!-- name: test_custom_return_types -->
-```python
-import os
-import dataclasses
-from rmote.protocol import Tool
-
-
-@dataclasses.dataclass
+@dataclass
 class FileInfo:
     path: str
     size: int
 
 
-class Inspector(Tool):
-    @staticmethod
-    def stat(path: str) -> "FileInfo":
-        s = os.stat(path)
-        return FileInfo(path=path, size=s.st_size)
-```
+class Inventory(Tool):
+    encoding: ClassVar[str] = "utf-8"
 
-```{note}
-The dataclass (or any custom type you return) must be defined *outside* the `Tool`
-class body so it is available both in the tool source sent to the remote side and in
-the local namespace where the result is unpickled.
-```
+    @classmethod
+    def read_text(cls, path: str) -> str:
+        return Path(path).read_text(encoding=cls.encoding)
 
-## Complete Example
-
-<!-- name: test_complete_example -->
-```python
-import asyncio
-import dataclasses
-import shutil
-import socket
-from rmote.protocol import Protocol, Tool
-
-
-@dataclasses.dataclass
-class DiskUsage:
-    path: str
-    total: int
-    used: int
-    free: int
-
-
-class SystemInfo(Tool):
-    @staticmethod
-    def disk_usage(path: str = "/") -> "DiskUsage":
-        """Return disk usage statistics for *path*."""
-        total, used, free = shutil.disk_usage(path)
-        return DiskUsage(path=path, total=total, used=used, free=free)
+    @classmethod
+    async def read_text_async(cls, path: str) -> str:
+        return await asyncio.to_thread(cls.read_text, path)
 
     @staticmethod
-    def hostname() -> str:
-        """Return the remote machine hostname."""
-        return socket.gethostname()
+    def stat(path: str) -> FileInfo:
+        return FileInfo(path=path, size=Path(path).stat().st_size)
 
     @classmethod
     def name(cls) -> str:
         return cls.__name__
+```
+
+Each tool must inherit from {class}`~rmote.protocol.Tool`. Use static or class
+methods and pass operation inputs as arguments. The metaclass rejects an
+explicit `__init__` with `TypeError`.
+
+File paths passed to a tool refer to the remote host. The following examples
+use a local subprocess, so the client and remote interpreter share a filesystem.
+
+## Call the Same Tool with Either Client
+
+### Synchronous client
+
+Save this code as `client_sync.py` beside `inventory.py`. The factory opens the
+connection; the `with` statement closes it when the block exits.
+
+<!-- name: test_inventory_sync; fixtures: inventory_module, __name__; marks: timeout(10) -->
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from inventory import FileInfo, Inventory
+from rmote.sync import Connection
+
+
+def main() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "sample.txt"
+        path.write_text("hello\n", encoding="utf-8")
+
+        with Connection.from_local(rpc_timeout=5.0) as remote:
+            assert remote(Inventory.read_text, str(path)) == "hello\n"
+            assert remote(Inventory.read_text_async, str(path)) == "hello\n"
+            info = remote(Inventory.stat, str(path))
+            assert isinstance(info, FileInfo)
+            assert info.size == 6
+            assert remote(Inventory.name) == "Inventory"
+
+            try:
+                remote(Inventory.read_text, str(path) + ".missing")
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError("The missing file must raise FileNotFoundError")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The async tool method still runs on the remote event loop. The synchronous client
+waits for its result without requiring `await` in the client script.
+Use `Connection.from_ssh(...)` for a remote host; see {doc}`quickstart` for
+connection parameters and lifecycle details.
+
+### Asynchronous client
+
+Save this code as `client_async.py` beside `inventory.py`. The existing async API
+uses the same tool and return types:
+
+<!-- name: test_inventory_async; fixtures: inventory_module, __name__; marks: timeout(10) -->
+```python
+import asyncio
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from inventory import FileInfo, Inventory
+from rmote.protocol import Protocol
 
 
 async def main() -> None:
-    process = await asyncio.create_subprocess_exec(
-        "python3", "-qui",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    proto = await Protocol.from_subprocess(process)
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "sample.txt"
+        path.write_text("hello\n", encoding="utf-8")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-qui",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with await Protocol.from_subprocess(process) as remote:
+                assert await remote(Inventory.read_text, str(path)) == "hello\n"
+                assert await remote(Inventory.read_text_async, str(path)) == "hello\n"
+                info = await remote(Inventory.stat, str(path))
+                assert isinstance(info, FileInfo)
+                assert info.size == 6
+                assert await remote(Inventory.name) == "Inventory"
 
-    async with proto:
-        host = await proto(SystemInfo.hostname)
-        du = await proto(SystemInfo.disk_usage, "/")
-        print(f"{host}: {du.free // 2**30} GB free on /")
+                try:
+                    await remote(Inventory.read_text, str(path) + ".missing")
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise AssertionError("The missing file must raise FileNotFoundError")
+        finally:
+            # from_subprocess closes the protocol; the caller owns the process.
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`Protocol.from_subprocess` bootstraps the remote process, then each `await proto(...)` first
-syncs the tool class (once) and then issues the RPC call. Because the two calls are sequential,
-the second call reuses the already-synced `SystemInfo` class:
+## Choose `def` or `async def` for the Remote Work
 
-```{mermaid}
-sequenceDiagram
-    participant L as Local
-    participant R as python3 subprocess
+| Tool method | Remote execution | Suitable work |
+|---|---|---|
+| `def` | A worker thread, through `asyncio.to_thread` | Blocking filesystem, subprocess, or library calls |
+| `async def` | The remote event loop | Awaitable operations and async coordination |
 
-    Note over L,R: Protocol.from_subprocess - bootstrap
-    L->>R: exec(decompress(b64decode(payload)))
-    R-->>L: PROTOCOL READY
+Declaring a method `async def` does not make blocking I/O asynchronous.
+For example, `urllib.request.urlopen()` blocks even inside an async method.
+Use a `def` method for that operation, or move it into `asyncio.to_thread()`.
+The `Inventory.read_text_async` example uses this approach for a filesystem read.
 
-    Note over L,R: await proto(SystemInfo.hostname) - first call
-    L->>R: SYNC SystemInfo source
-    R-->>L: ACK
-    L->>R: REQUEST {hostname, id=1}
-    R-->>L: RESPONSE {"web01", id=1}
+Do not call `time.sleep()`, `subprocess.run()`, or other blocking functions
+directly in an async method. While that call runs, the remote loop cannot
+process other RPCs or send their responses.
 
-    Note over L,R: await proto(SystemInfo.disk_usage, "/") - sync skipped
-    L->>R: REQUEST {disk_usage, "/", id=2}
-    R-->>L: RESPONSE {DiskUsage(path="/", ...), id=2}
+## Module Tools and Inline Tools
+
+### Module tools
+
+For a tool defined at module level, rmote reads and transfers the **whole module**.
+Module-level stdlib imports, helper functions, constants, dataclasses, and other
+tool classes in that file are available remotely. `inventory.py` uses this form.
+Imports of `rmote.*` other than `rmote.protocol` are stripped from the transferred
+source; client-side modules are not part of the injected runtime.
+
+The remote interpreter executes the module's top-level statements when it loads
+the module. Avoid top-level connections, file writes, or local initialization.
+Keep client code in a separate script protected by
+`if __name__ == "__main__":`. Import the tool module by its normal module name.
+
+Transferring a module does not transfer every module that it imports.
+Keep supporting code in the tool module, use stdlib dependencies, or ensure
+that additional dependencies already exist remotely. rmote does not install them.
+The source and dependencies must also support the remote Python version.
+
+Tools in different modules use module-qualified names, such as
+`inventory.Inventory`. Two module tools with the same class name therefore
+remain distinct. A loaded module and its tools remain cached in that remote
+interpreter. Editing the local source does not update an existing connection;
+open a new connection to load the updated definitions.
+
+### Inline tools
+
+An *inline tool* is a class defined **inside a function**, not simply a class
+in the same file as the client. rmote transfers only that class's source.
+The surrounding function, closure values, and module globals are not transferred.
+
+Put required imports inside the methods. `Tool` and the protocol helpers are
+available in the reconstructed namespace. Return built-in picklable values for
+this pattern; put shared custom types in a module tool instead.
+
+This complete inline example needs no extra module:
+
+<!-- name: test_inline_both_methods; subprocess: true; marks: timeout(10) -->
+```python
+from rmote.protocol import Tool
+from rmote.sync import Connection
+
+
+def main() -> None:
+    class Echo(Tool):
+        @staticmethod
+        def echo(value: str) -> str:
+            return value
+
+        @staticmethod
+        async def later(value: str) -> str:
+            import asyncio
+
+            await asyncio.sleep(0)
+            return value
+
+    with Connection.from_local(rpc_timeout=5.0) as remote:
+        assert remote(Echo.echo, "sync method") == "sync method"
+        assert remote(Echo.later, "async method") == "async method"
+
+
+if __name__ == "__main__":
+    main()
 ```
+
+Inline tools use a bare class name. Two different inline classes with the same
+name can collide on one connection. Use module tools when names or supporting
+types need stable identities.
+
+Source extraction needs a readable source file. Definitions from a REPL,
+`exec()` string, or notebook are not a portable way to supply tools.
+Keep production tools in `.py` files.
+
+(returning-custom-types)=
+## Arguments, Results, and Exceptions
+
+The protocol uses `pickle` for arguments, results, and remote exceptions.
+Built-in values such as strings, bytes, numbers, lists, and dictionaries work
+when their contents are also picklable. Dataclasses can provide structured
+results, as `FileInfo` does in the example.
+
+Define custom types in the transferred tool module and import that same module
+locally before making calls. This gives `pickle` the same module and class names
+on both sides. Module-level dataclasses are convenient; nested dataclasses can
+also work when the containing tool module is transferred.
+An external custom type needs its defining module on both sides.
+
+Do not pass or return open files, generators, coroutine objects, event loops,
+or other objects that `pickle` cannot serialize. Return data instead of a
+live local or remote resource. A tool exception such as `FileNotFoundError`
+is raised in the client, as shown by both client examples.
+
+Use rmote only with trusted peers and trusted tool source. The remote executes
+transferred Python code, and unpickling data can execute Python code locally.
+The wire format does not provide a sandbox for an untrusted endpoint.
+
+## Class Variables and Concurrent Calls
+
+`ClassVar` documents class-level configuration, such as `Inventory.encoding`.
+Its value comes from the transferred source. Changing the local class variable
+after synchronization does not change the remote value.
+
+Remote class or module state can remain between calls on a connection.
+It does not automatically survive a new remote process or synchronize with
+another connection. Prefer explicit arguments and returned data when possible.
+
+RPCs can overlap, including calls from different local threads. A `def` method
+can run alongside another worker-thread method or an async method. Protect
+shared mutable state or avoid it. An async method can also interleave with
+other methods whenever it awaits.
+
+## Run Subprocesses and Return Their Output
+
+During bootstrap, `from_stdio` duplicates the protocol descriptors and redirects
+the remote process's standard descriptors to `/dev/null`. The duplicated
+descriptors are not inherited by child processes. A child using default stdio
+therefore does not inherit the protocol pipes, but its output is discarded.
+
+Use {func}`rmote.protocol.process` to set command I/O explicitly. It is a blocking
+helper intended for `def` methods; use `asyncio.to_thread()` from an async method.
+Without `stdin`, it sets `stdin=DEVNULL`. With `capture_output=True`, it captures
+stdout and stderr; otherwise it redirects both to `DEVNULL`.
+
+For example, save this as a separate tool module:
+
+<!-- name: test_command_module -->
+```python
+import sys
+
+from rmote.protocol import Tool, process
+
+
+class Commands(Tool):
+    @staticmethod
+    def python_output() -> str:
+        completed = process(
+            sys.executable, "-c", "print('ready')",
+            capture_output=True, text=True, check=True,
+        )
+        return completed.stdout
+```
+
+`python_output()` returns `"ready\n"`. `check=True` raises
+`subprocess.CalledProcessError` for a nonzero exit status. Avoid shell execution
+when passing untrusted arguments; pass the executable and each argument separately.
+
+Remote `print()` output is discarded by the stdio protection. Return command
+output as data. Use Python `logging` for remote events that the client should
+receive. Local handlers for those records run in the synchronous client's
+runtime thread; they must be thread-safe and must not call the blocking API
+of that same connection.
