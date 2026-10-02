@@ -436,7 +436,7 @@ class BaseProtocol:
     async def from_subprocess(cls, process: asyncio.subprocess.Process) -> Self:
         assert process.stdin is not None, "Process stdin must not be None"
         assert process.stdout is not None, "Process stdout must not be None"
-        process.stdin.write(bootstrap_packer(open(__file__, "rb").read()))
+        process.stdin.write(bootstrap_packer(Path(__file__).read_bytes()))
         process.stdin.write(b"asyncio.run(run())\n")
         return cls(reader=process.stdout, writer=process.stdin)
 
