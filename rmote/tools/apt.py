@@ -23,13 +23,13 @@ class Package:
     version: str = ""
 
     @classmethod
-    def parse(cls, s: str | object, state: State | int = State.PRESENT) -> "Package":
-        coerced = State(state)
+    def parse(cls, s: str | object, state: State | int | None = None) -> "Package":
+        """Use the explicit state, then Package.state, then PRESENT."""
         if isinstance(s, cls):
-            return cls(name=s.name, version=s.version, state=s.state)
+            return cls(name=s.name, version=s.version, state=State(s.state if state is None else state))
         if not isinstance(s, str):
             raise TypeError(f"Expected str or Package, got {type(s).__name__!r}")
-        return cls.from_string(s, state=coerced)
+        return cls.from_string(s, state=State.PRESENT if state is None else State(state))
 
     @classmethod
     def from_string(cls, s: str, state: State = State.PRESENT) -> "Package":
@@ -140,7 +140,7 @@ class Apt(Tool):
         return True
 
     @classmethod
-    def package(cls, package: str | Package, state: State | int = State.PRESENT) -> Result:
+    def package(cls, package: str | Package, state: State | int | None = None) -> Result:
         """Install, remove, or upgrade a single package.
 
         Args:
@@ -149,6 +149,8 @@ class Apt(Tool):
             state: Desired state - :attr:`State.PRESENT` (install if absent),
                 :attr:`State.ABSENT` (purge if installed), or
                 :attr:`State.LATEST` (install or upgrade to candidate version).
+                An explicit state overrides Package.state. If omitted, use
+                Package.state for objects or PRESENT for strings.
 
         Returns:
             :class:`Result` with the package name, installed version, and
@@ -158,6 +160,7 @@ class Apt(Tool):
             RuntimeError: If the underlying ``apt-get`` invocation fails.
         """
         package = Package.parse(package, state=state)
+        state = State(package.state)
 
         if cls._status is None:
             status = Backend.read_status()
@@ -205,7 +208,7 @@ class Apt(Tool):
 
     @classmethod
     def converge(cls, *packages: str | Package) -> list[Result]:
-        """Ensure all *packages* are present, reading dpkg status once for efficiency.
+        """Apply each Package.state; string arguments default to PRESENT.
 
         Args:
             *packages: Package names, ``name=version`` strings, or
