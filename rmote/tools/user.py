@@ -82,6 +82,13 @@ class Backend:
 
         return [g.gr_name for g in grp.getgrall() if name in g.gr_mem]
 
+    @staticmethod
+    def get_comment(name: str) -> str:
+        """Return the user's current GECOS field."""
+        import pwd
+
+        return pwd.getpwnam(name).pw_gecos
+
 
 class User(Tool):
     """Manage users, groups, SSH keys, and sudoers on the remote host. Requires root."""
@@ -157,15 +164,17 @@ class User(Tool):
             mod_args += ["--gid", str(gid)]
         if shell and shell_out != shell:
             mod_args += ["--shell", shell]
-        if comment:
+        if comment and Backend.get_comment(name) != comment:
             mod_args += ["--comment", comment]
         if home and home_out != home:
             mod_args += ["--home", home, "--move-home"]
         if groups is not None:
-            flag = "--append" if append_groups else ""
-            if flag:
-                mod_args += [flag, "--groups", ",".join(groups)]
-            else:
+            current_groups = set(Backend.get_groups(name))
+            desired_groups = set(groups)
+            matches = desired_groups <= current_groups if append_groups else desired_groups == current_groups
+            if not matches:
+                if append_groups:
+                    mod_args.append("--append")
                 mod_args += ["--groups", ",".join(groups)]
 
         if mod_args:
