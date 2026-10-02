@@ -692,11 +692,28 @@ class Protocol(BaseProtocol):
                 flags = Flags.EXCEPTION | Flags.RESPONSE
 
             if need_response:
-                await self.send(resp, flags, packet_id)
+                await self._send_response(resp, flags, packet_id)
 
         task = asyncio.create_task(wrapper())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    async def _send_response(self, response: Any, flags: Flags, packet_id: int) -> None:
+        """Send a response or a portable serialization error; close after a transport failure."""
+        try:
+            await self.send(response, flags, packet_id)
+        except Exception as error:
+            if self.writer.is_closing():
+                self._finish_pending(error)
+                return
+            # Serialization/compression failed before any bytes were written.
+            # Error text can itself be unsafe to format or pickle.
+            fallback = RuntimeError(f"Remote response serialization failed ({type(error).__name__})")
+            try:
+                await self.send(fallback, Flags.EXCEPTION | Flags.RESPONSE, packet_id)
+            except Exception as fallback_error:
+                self.writer.close()
+                self._finish_pending(fallback_error)
 
     async def wait_closed(self) -> None:
         await self._closed.wait()
