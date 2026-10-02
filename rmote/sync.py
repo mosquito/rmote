@@ -289,6 +289,9 @@ class Connection:
         None disables this call's deadline. Timeout and KeyboardInterrupt stop
         local waiting. They do not stop the remote operation. A cancellation
         during packet transmission can make the connection unusable.
+        After a detected transport failure, new calls raise ConnectionError
+        with the original error as their cause. Calls already waiting for a
+        response propagate the original transport error.
         """
         self._check_caller()
         _check_timeout(timeout, "timeout")
@@ -318,6 +321,8 @@ class Connection:
     ) -> Any:
         operation.task = asyncio.current_task()
         assert self._protocol is not None
+        if self._protocol._closed.is_set():
+            raise ConnectionError("Connection transport is closed") from self._protocol._close_error
         async with asyncio.timeout(timeout):
             return await self._protocol._call_tool(tool, *args, **kwargs)
 
