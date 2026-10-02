@@ -545,6 +545,8 @@ class Protocol(BaseProtocol):
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         super().__init__(reader, writer)
         self._tools_cache: set[type[Tool]] = set()
+        self._tool_sync_locks: dict[type[Tool], asyncio.Lock] = {}
+        self._tool_load_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.futures: dict[int, asyncio.Future[Any]] = {}
         self.loop = asyncio.get_running_loop()
         self._tools_cache = set()
@@ -560,8 +562,8 @@ class Protocol(BaseProtocol):
         self.__last_id = 0
         self.__last_id_lock = threading.Lock()
 
-        # Separate ID generation for LOG packets (use negative IDs to avoid conflicts)
-        self.__last_log_id = 0
+        # LOG IDs count down within the unsigned 64-bit wire field; RPC IDs count up.
+        self.__last_log_id = 1 << 64
         self.__last_log_id_lock = threading.Lock()
 
     def get_id(self) -> int:
@@ -603,12 +605,23 @@ class Protocol(BaseProtocol):
             await self._owned_process.wait()
             self._owned_process = None
 
-    def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
-        tool_cls = tool_from_dict(tool_definition)
+    async def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
         module = tool_definition.get("module")
-        key = f"{module}.{tool_cls.__name__}" if module else tool_cls.__name__
-        self.tools[key] = tool_cls()
-        logging.debug("Loaded tool %s", tool_definition)
+        name = tool_definition["name"]
+        key = f"{module}.{name}" if module else name
+        # Classes from one module share its globals and top-level side effects.
+        load_key = ("module", module) if module else ("inline", name)
+        lock = self._tool_load_locks.setdefault(load_key, asyncio.Lock())
+        async with lock:
+            if key in self.tools:
+                return
+
+            def build_tool() -> Tool:
+                return tool_from_dict(tool_definition)()
+
+            instance = await asyncio.to_thread(build_tool)
+            self.tools[key] = instance
+            logging.debug("Loaded tool %s", tool_definition)
 
     async def _handle_rpc_request(self, request: RPCRequest, _: int) -> Any:
         if "." not in request["method"]:
@@ -646,6 +659,7 @@ class Protocol(BaseProtocol):
 
     @staticmethod
     async def _handle_log(record: LogRecord, _: int) -> None:
+        """Deliver a remote record to local handlers in the protocol loop thread."""
         logger = logging.getLogger(f"rmote.remote.{record['name']}")
         log_record = logging.LogRecord(
             name=record["name"],
@@ -767,8 +781,11 @@ class Protocol(BaseProtocol):
         if tool_class is None:
             raise ValueError("Only methods of Tool classes can be called with call_tool()")
         if tool_class not in self._tools_cache:
-            await self._call(tool_to_dict(tool_class), Flags.SYNC | Flags.REQUEST)
-            self._tools_cache.add(tool_class)
+            lock = self._tool_sync_locks.setdefault(tool_class, asyncio.Lock())
+            async with lock:
+                if tool_class not in self._tools_cache:
+                    await self._call(tool_to_dict(tool_class), Flags.SYNC | Flags.REQUEST)
+                    self._tools_cache.add(tool_class)
         # Use module-qualified name for file-based tools to avoid collisions
         # when different modules define tools with the same class name.
         # Inline tools (qualname contains <locals>) use bare class name.
@@ -796,12 +813,30 @@ class RemoteLogHandler(logging.Handler):
             levelname=record.levelname,
             pathname=record.pathname,
             lineno=record.lineno,
-            msg=record.msg,
-            args=record.args,
+            msg=record.getMessage(),
+            args=(),
             exc_info=record.exc_info,
         )
-        # LOG packets use negative IDs to avoid conflicts with RPC packet_ids
-        self.loop.create_task(self.protocol.send(record_dict, Flags.LOG, self.protocol.get_log_id()))
+
+        async def send_record() -> None:
+            try:
+                # LOG IDs use the upper end of the unsigned packet ID field.
+                await self.protocol.send(record_dict, Flags.LOG, self.protocol.get_log_id())
+            except Exception:
+                self.handleError(record)
+
+        def schedule() -> None:
+            if self.protocol._closed.is_set():
+                return
+            task = self.loop.create_task(send_record())
+            self.protocol._tasks.add(task)
+            task.add_done_callback(self.protocol._tasks.discard)
+
+        # Synchronous Tool methods emit records from executor threads.
+        try:
+            self.loop.call_soon_threadsafe(schedule)
+        except RuntimeError:
+            self.handleError(record)
 
 
 async def run() -> None:

@@ -39,6 +39,10 @@ class Connection:
 
     Use a factory to connect. Factories finish the handshake before returning.
     Close the connection explicitly or use a context manager.
+
+    Multiple caller threads can share the connection. Remote log records invoke
+    local logging handlers in the background loop thread. Those handlers must
+    not call synchronous methods of this connection.
     """
 
     def __init__(self, *, _factory: bool = False) -> None:
