@@ -110,8 +110,8 @@ class Template:
         """Compile a Mako-like *template* string into a reusable render function.
 
         Returns a callable that accepts ``**ctx`` keyword arguments and returns
-        the rendered string.  Results are cached so repeated
-        calls with the same template string are free.
+        the rendered string. Compiled functions are cached by source text
+        within this process. Rendering still executes the function.
         """
         indent_level = 0
         indent_unit = "    "

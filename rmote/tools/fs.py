@@ -35,7 +35,7 @@ class FileSystem(Tool):
 
     @staticmethod
     def read_str(path: str) -> str:
-        """Read *path* and return its contents decoded as UTF-8.
+        """Read *path* using the remote Python process's default text encoding.
 
         Args:
             path: Absolute or relative path on the remote filesystem.
@@ -54,7 +54,7 @@ class FileSystem(Tool):
             pattern: Glob pattern relative to *path* (e.g. ``"*.conf"``).
 
         Returns:
-            Sorted list of matching paths as strings.
+            Matching paths as strings, with no guaranteed order.
         """
         return list(map(str, Path(path).glob(pattern)))
 

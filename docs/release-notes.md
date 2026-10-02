@@ -45,19 +45,14 @@ protocol and escalates subprocess termination when necessary. `close_timeout`
 controls the initial graceful shutdown wait, not a hard deadline for all cleanup.
 Event loop shutdown requires cooperative tasks and completion of executor work.
 
-The private loop has a small idle CPU cost in local measurements. The subprocess
-backend can create additional watcher and executor threads. The thread handoff
-adds overhead to short RPC calls; use the asynchronous client for asynchronous
-applications or high concurrency. Closing a connection releases its owned
-resources but does not guarantee an immediate decrease in process RSS. Runtimes
-are not shared between connections.
-
 ### Protocol and tool fixes
 
 - Concurrent first calls load each tool once per connection.
 - Cancellation and transport failures remove pending RPC requests. Response
   serialization failures return an error instead of leaving the caller waiting.
 - Remote exception logs preserve traceback text across the connection.
+- `Exec.command` and `Exec.shell` discard output by default. Pass
+  `capture_output=True` to receive stdout and stderr as bytes.
 - Process tools accept text input correctly when text mode is enabled.
 - Template expressions use Python tokenization for expression boundaries.
 - Package state handling is consistent across Apt and Pacman; Apt reads current

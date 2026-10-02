@@ -287,7 +287,10 @@ class User(Tool):
     @staticmethod
     def sudoer(name: str, *, nopasswd: bool = True, absent: bool = False) -> bool:
         """
-        Manage a sudoers drop-in for a user in /etc/sudoers.d/.
+        Manage a sudoers drop-in granting all commands as any user.
+
+        Writes /etc/sudoers.d/<name> with mode 0440. The rule is not validated
+        with visudo; callers must validate the resulting sudo configuration.
 
         Args:
             name: Username

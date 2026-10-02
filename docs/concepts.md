@@ -33,7 +33,7 @@ Explicit `close()` rejects new calls, closes the channel, reaps its process, and
 joins the thread. Repeated close is safe. Nested context entry and operations
 after closing raise `RuntimeError`.
 
-See {doc}`quickstart` for both client styles and {doc}`api/sync` for exact deadlines.
+See {doc}`writing-tools` for both client styles and {doc}`api/sync` for deadlines.
 
 ## Cancellation and Logging
 
@@ -124,69 +124,42 @@ The `flags` field is a combination of {class}`~rmote.protocol.Flags` values:
 
 Tools are transferred lazily and cached for the lifetime of the connection:
 
-1. **Definition** - {class}`~rmote.protocol.ToolMeta` metaclass captures the class source via
-   `inspect.getsource` at class-definition time.
+1. `ToolMeta` records class source for the inline-tool fallback. For a class
+   defined at module level, `tool_to_dict` reads the whole module's source.
+2. The first call sends that source in a `SYNC | REQUEST` packet. The receiver
+   executes it in a module namespace and registers the module in `sys.modules`.
+3. The receiver constructs a tool instance and stores it in `Protocol.tools`.
+   Module tools use `module.ClassName` as their key. Inline tools use the bare
+   class name, so two inline tools with the same name can collide.
+4. Concurrent first calls share loading locks. Classes from one module reuse
+   that module's namespace. Later calls send an RPC packet without another
+   successful upload.
 
-2. **Serialization** - {func}`~rmote.protocol.tool_to_dict` packages the source into a dict,
-   stripping local `rmote.*` imports that are irrelevant on the remote side.
+Opening a connection does not upload tools. Each new connection has a new
+local cache and loads tools on first use. Editing local source does not update
+an already loaded remote module. See {doc}`writing-tools` for source layout,
+dependencies, and custom return types.
 
-3. **Transfer** - A `SYNC | REQUEST` packet carries the dict to the remote side.
+## Standard Streams and Trust
 
-4. **Reconstruction** - {func}`~rmote.protocol.tool_from_dict` runs `exec` on the source
-   inside a fresh module namespace, then caches the resulting class in `sys.modules`.
+The remote bootstrap duplicates the descriptors used for protocol traffic and
+redirects standard input, output, and error to `/dev/null`. The protocol copies
+are not inherited by child commands. Remote `print()` and uncaptured command
+output are discarded; use return values or logging to send information back.
 
-5. **Registration** - On the remote side, the tool instance is stored in `Protocol.tools` keyed
-   by its **module-qualified name** (`module.ClassName`). Inline tools (defined inside a function)
-   use the bare class name. This means two Tool subclasses with the same class name in different
-   modules are dispatched correctly — they occupy separate keys.
-
-6. **Cache** - The local `Protocol` caches loaded tools. Concurrent first calls
-   share a per-tool loading lock, so they do not duplicate a successful upload.
-   Later calls send only the RPC packet. The synchronous client uses the same cache.
-
-**Lazy** - No SYNC packets are sent when a connection is opened or when a Tool class is defined.
-The transfer happens the first time a method on that class is actually *called* through a given
-connection.
-
-**Per-connection** - The cache lives on the `Protocol` instance. Each new connection starts with
-an empty cache, so a tool that was synced on a previous connection will be re-synced on first use
-through the new one.
+Tool source executes on the target, and messages contain pickled Python values.
+Use rmote only with trusted peers and code. The packet format does not provide
+authentication or encryption; use a trusted local process or an SSH transport.
 
 ## Concurrency Model
 
-rmote uses asyncio on both sides to handle multiple in-flight requests without blocking:
+rmote matches concurrent requests with their responses by packet ID:
 
 - Each {meth}`~rmote.protocol.Protocol.__call__` invocation generates a unique `packet_id`
   from a thread-safe counter.
-- A `asyncio.Future` is stored in `Protocol.futures` keyed by `packet_id`.
+- An `asyncio.Future` is stored in `Protocol.futures` keyed by `packet_id`.
 - The `_loop` task continuously reads incoming packets. When a response arrives its
   `packet_id` is used to look up and resolve the corresponding future.
 - Remote-side handlers run as asyncio tasks. A `def` Tool method runs in a worker
   thread; an `async def` method runs in the remote loop. Blocking work inside an
   async method blocks that loop. See {doc}`writing-tools` for method selection.
-
-```{mermaid}
-sequenceDiagram
-    participant C as caller (your code)
-    participant L as Local _loop
-    participant R as Remote _loop
-
-    C->>L: await proto(Tool.method, *args)
-    Note over L: packet_id = get_id()<br/>futures[id] = Future()
-    L->>R: REQUEST {method, args, id=N}
-    activate R
-    Note over R: create_task(_handle_rpc_request)
-
-    C->>L: await proto(Tool.other, *args)
-    Note over L: packet_id = get_id()<br/>futures[id] = Future()
-    L->>R: REQUEST {other,  args, id=N+1}
-
-    R-->>L: RESPONSE {result_1, id=N}
-    deactivate R
-    Note over L: futures[N].set_result(result_1)
-    L-->>C: result_1
-
-    R-->>L: RESPONSE {result_2, id=N+1}
-    Note over L: futures[N+1].set_result(result_2)
-    L-->>C: result_2
-```
