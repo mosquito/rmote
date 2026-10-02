@@ -108,8 +108,6 @@ class Backend:
 class Apt(Tool):
     """Manage Debian/Ubuntu packages via apt-get. Requires root on the remote host."""
 
-    _status: ClassVar[Mapping[str, Mapping[str, str]] | None] = None
-
     @staticmethod
     def update(ttl: int | float = -1) -> bool:
         """Run ``apt-get update``, with optional TTL-based skipping.
@@ -162,11 +160,7 @@ class Apt(Tool):
         package = Package.parse(package, state=state)
         state = State(package.state)
 
-        if cls._status is None:
-            status = Backend.read_status()
-        else:
-            status = cls._status
-
+        status = Backend.read_status()
         info = status.get(package.name, {})
         installed = info.get("Status", "") == "install ok installed"
         version = info.get("Version", "")
@@ -218,5 +212,4 @@ class Apt(Tool):
             List of :class:`Result` objects, one per package, in the same order
             as the input.
         """
-        cls._status = Backend.read_status()
         return [cls.package(pkg) for pkg in packages]

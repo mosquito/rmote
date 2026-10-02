@@ -11,7 +11,6 @@ from rmote.tools import apt, pacman
 def test_package_object_state(module, monkeypatch):
     tool: type[apt.Apt] | type[pacman.Pacman]
     if module is apt:
-        monkeypatch.setattr(apt.Apt, "_status", None)
         monkeypatch.setattr(
             apt.Backend,
             "read_status",
@@ -39,7 +38,6 @@ def test_package_object_state(module, monkeypatch):
 def test_package_latest_state(module, converge, monkeypatch):
     tool: type[apt.Apt] | type[pacman.Pacman]
     if module is apt:
-        monkeypatch.setattr(apt.Apt, "_status", None)
         monkeypatch.setattr(
             apt.Backend,
             "read_status",
@@ -63,7 +61,6 @@ def test_package_latest_state(module, converge, monkeypatch):
 def test_package_explicit_state_overrides_object(module, monkeypatch):
     tool: type[apt.Apt] | type[pacman.Pacman]
     if module is apt:
-        monkeypatch.setattr(apt.Apt, "_status", None)
         monkeypatch.setattr(apt.Backend, "read_status", lambda: {})
         backend_call = Mock(return_value=(0, "", ""))
         monkeypatch.setattr(apt.Backend, "apt_get", backend_call)
