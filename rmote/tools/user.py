@@ -106,7 +106,7 @@ class User(Tool):
         Args:
             name: Username
             uid: Numeric UID (optional)
-            gid: Primary GID or group name (optional)
+            gid: Numeric primary GID (optional)
             comment: GECOS field
             home: Home directory path (default: /home/<name>)
             shell: Login shell
@@ -151,6 +151,10 @@ class User(Tool):
         uid_out, gid_out, home_out, shell_out = existing
         mod_args: list[str] = []
 
+        if uid is not None and uid_out != uid:
+            mod_args += ["--uid", str(uid)]
+        if gid is not None and gid_out != gid:
+            mod_args += ["--gid", str(gid)]
         if shell and shell_out != shell:
             mod_args += ["--shell", shell]
         if comment:
