@@ -9,7 +9,7 @@ import pytest
 
 from rmote.sync import Connection
 from rmote.tools.file_sync import FileSync
-from rmote.transfer import async_sync_file, sync_file
+from rmote.transfer import async_download, async_upload, download, upload
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,7 @@ async def test_transfer(protocol, tmp_path, direction, original, desired, transf
             payloads.append(result)
         return result
 
-    result = await async_sync_file(remote, source, target, direction=direction, block_size=4)
+    result = await (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
     assert target.read_bytes() == desired
     assert result.size == len(desired)
     assert result.transferred == transferred
@@ -67,9 +67,9 @@ def test_sync_connection(tmp_path: Path, direction: Literal["upload", "download"
     source, target = tmp_path / "source", tmp_path / "target"
     source.write_bytes(b"test" * 20)
     with Connection.from_local() as connection:
-        result = sync_file(connection, source, target, direction=direction, block_size=8)
+        result = (upload if direction == "upload" else download)(connection, source, target, block_size=8)
         assert result.changed
-        assert not sync_file(connection, source, target, direction=direction, block_size=8).changed
+        assert not (upload if direction == "upload" else download)(connection, source, target, block_size=8).changed
     assert source.read_bytes() == target.read_bytes()
 
 
@@ -117,7 +117,9 @@ async def test_failure_preserves_target(protocol, tmp_path, direction, failure):
                 task.cancel()
         return result
 
-    task = asyncio.create_task(async_sync_file(remote, source, target, direction=direction, block_size=4))
+    task = asyncio.create_task(
+        (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
+    )
     with pytest.raises((RuntimeError, ValueError, asyncio.CancelledError)):
         await task
     assert target.read_bytes() == (b"external" if failure == "target_changed" else b"original")
@@ -139,7 +141,7 @@ async def test_rejects_symlinks(protocol, tmp_path, which):
     path.unlink(missing_ok=True)
     path.symlink_to(other)
     with pytest.raises(OSError):
-        await async_sync_file(protocol, source, target)
+        await async_upload(protocol, source, target)
     assert other.read_bytes() == b"untouched"
     assert path.is_symlink()
     assert not list(tmp_path.glob(".*.rmote-*"))
@@ -148,7 +150,7 @@ async def test_rejects_symlinks(protocol, tmp_path, which):
 @pytest.mark.asyncio
 async def test_missing_source(protocol, tmp_path):
     with pytest.raises(FileNotFoundError):
-        await async_sync_file(protocol, tmp_path / "missing", tmp_path / "target")
+        await async_upload(protocol, tmp_path / "missing", tmp_path / "target")
     assert not (tmp_path / "target").exists()
 
 
@@ -156,7 +158,7 @@ async def test_missing_source(protocol, tmp_path):
 @pytest.mark.parametrize("block_size", [0, -1, 16 * 1024 * 1024 + 1])
 async def test_invalid_block_size(protocol, tmp_path, block_size):
     with pytest.raises(ValueError, match="block_size"):
-        await async_sync_file(protocol, tmp_path / "missing", tmp_path / "target", block_size=block_size)
+        await async_upload(protocol, tmp_path / "missing", tmp_path / "target", block_size=block_size)
 
 
 def test_final_digest_and_incomplete_transfer(tmp_path):
@@ -195,7 +197,7 @@ async def test_target_unchanged_until_commit(protocol, tmp_path, direction):
             seen.append(method)
         return result
 
-    result = await async_sync_file(remote, source, target, direction=direction, block_size=4)
+    result = await (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
     assert seen
     assert result.transferred == 4
     assert result.reused == 4
@@ -229,5 +231,5 @@ def test_replace_failure_preserves_original(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sync_helper_rejects_event_loop(tmp_path):
-    with pytest.raises(RuntimeError, match="async_sync_file"):
-        sync_file(lambda *args: None, tmp_path / "a", tmp_path / "b")
+    with pytest.raises(RuntimeError, match="async_upload or async_download"):
+        upload(lambda *args: None, tmp_path / "a", tmp_path / "b")

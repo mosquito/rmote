@@ -1,27 +1,28 @@
 File synchronization
 ====================
 
-``sync_file`` accepts a synchronous ``Connection``. Paths are interpreted in
+``upload`` and ``download`` accept a synchronous ``Connection``. Paths are interpreted in
 transfer order: source first, destination second. For upload the source is local;
 for download the source is remote.
 
 .. code-block:: python
 
    from rmote.sync import Connection
-   from rmote.transfer import sync_file
+   from rmote.transfer import download, upload
 
    with Connection.from_ssh("deploy@example.org") as connection:
-       result = sync_file(connection, "./app.tar", "/srv/app.tar")
+       result = upload(connection, "./app.tar", "/srv/app.tar")
        print(result.changed, result.transferred, result.reused)
-       sync_file(connection, "/var/log/app.log", "./app.log", direction="download")
+       download(connection, "/var/log/app.log", "./app.log")
 
-Async applications use ``async_sync_file`` with an open ``Protocol``:
+Async applications use ``async_upload`` and ``async_download`` with an open ``Protocol``:
 
 .. code-block:: python
 
-   from rmote.transfer import async_sync_file
+   from rmote.transfer import async_download, async_upload
 
-   result = await async_sync_file(protocol, "./app.tar", "/srv/app.tar")
+   result = await async_upload(protocol, "./app.tar", "/srv/app.tar")
+   await async_download(protocol, "/var/log/app.log", "./app.log")
 
 How it works
 ------------
@@ -69,7 +70,7 @@ API
 ---
 
 .. automodule:: rmote.transfer
-   :members: sync_file, async_sync_file
+   :members: upload, download, async_upload, async_download
 
 .. autoclass:: rmote.tools.file_sync.SyncResult
    :members:

@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from rmote.tools.file_sync import FileSync, SyncResult
 
+__all__ = ["upload", "download", "async_upload", "async_download"]
 
-async def async_sync_file(
+
+async def _async_sync_file(
     remote: Callable[..., Any],
     source: str | Path,
     destination: str | Path,
@@ -94,7 +96,7 @@ async def async_sync_file(
         raise
 
 
-def sync_file(
+def _sync_file(
     remote: Callable[..., Any],
     source: str | Path,
     destination: str | Path,
@@ -108,5 +110,59 @@ def sync_file(
     except RuntimeError:
         pass
     else:
-        raise RuntimeError("Use async_sync_file inside an event loop")
-    return asyncio.run(async_sync_file(remote, source, destination, direction=direction, block_size=block_size))
+        raise RuntimeError("Use async_upload or async_download inside an event loop")
+    return asyncio.run(_async_sync_file(remote, source, destination, direction=direction, block_size=block_size))
+
+
+async def async_upload(
+    remote: Callable[..., Any],
+    local_path: str | Path,
+    remote_path: str | Path,
+    *,
+    block_size: int = 1024 * 1024,
+) -> SyncResult:
+    """Synchronize a local file to a remote path using an open Protocol.
+
+    Only differing blocks are transmitted. The receiver assembles a temporary
+    file and atomically replaces the destination. Existing destination ownership
+    and permissions are retained; new files use mode 0600. Both paths must be
+    regular files (the destination may be absent); its parent must exist.
+    """
+    return await _async_sync_file(remote, local_path, remote_path, block_size=block_size)
+
+
+async def async_download(
+    remote: Callable[..., Any],
+    remote_path: str | Path,
+    local_path: str | Path,
+    *,
+    block_size: int = 1024 * 1024,
+) -> SyncResult:
+    """Synchronize a remote file to a local path using an open Protocol.
+
+    Uses the same block comparison, atomic replacement and metadata policy as
+    :func:`async_upload`. Arguments are source first, destination second.
+    """
+    return await _async_sync_file(remote, remote_path, local_path, direction="download", block_size=block_size)
+
+
+def upload(
+    remote: Callable[..., Any],
+    local_path: str | Path,
+    remote_path: str | Path,
+    *,
+    block_size: int = 1024 * 1024,
+) -> SyncResult:
+    """Synchronous :func:`async_upload` using a Connection, outside an event loop."""
+    return _sync_file(remote, local_path, remote_path, block_size=block_size)
+
+
+def download(
+    remote: Callable[..., Any],
+    remote_path: str | Path,
+    local_path: str | Path,
+    *,
+    block_size: int = 1024 * 1024,
+) -> SyncResult:
+    """Synchronous :func:`async_download` using a Connection, outside an event loop."""
+    return _sync_file(remote, remote_path, local_path, direction="download", block_size=block_size)
