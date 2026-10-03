@@ -1,7 +1,10 @@
-.PHONY: docs docs-clean docs-open reformat test tests mypy pytest
+.PHONY: docs docs-test docs-clean docs-open reformat test tests mypy pytest
 
 docs:
 	uv run --group docs sphinx-build -b html docs docs/_build/html -W
+
+docs-test:
+	uv run --group dev pytest rmote docs README.md -v
 
 docs-clean:
 	rm -rf docs/_build

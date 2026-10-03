@@ -70,6 +70,7 @@ an operation already running on the target.
 uv sync --group dev --group docs
 make test
 make docs
+make docs-test
 ```
 
 Some integration tests require Docker; SSH tests need local OpenSSH binaries.
@@ -78,3 +79,10 @@ examples run through `markdown-pytest` alongside the Python tests.
 
 rmote is beta software. See the [release notes](https://docs.rmote.org/release-notes.html)
 for changes and compatibility. Licensed under [Apache 2.0](LICENSE).
+
+Documentation pages use MyST Markdown (`.md`) and are built with Sphinx.
+API pages include docstrings through `autodoc` in `{eval-rst}` blocks.
+Runnable Markdown examples are checked by `markdown-pytest` via `make docs-test`
+and the regular test suite. Both also run API doctests directly from the
+docstrings in `rmote` using pytest's `--doctest-modules`. To run only API
+doctests, use `uv run pytest rmote`.
