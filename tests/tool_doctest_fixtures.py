@@ -3,6 +3,7 @@
 import asyncio
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -60,7 +61,8 @@ def arch_tool_image(tool_docker: str) -> str:
 
 def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Callable[..., Any]]:
     name = "rmote-doctest-" + uuid.uuid4().hex[:12]
-    command = [docker, "run", "--rm", "-d", "--name", name]
+    # Keep failed containers until the finally block so their logs are available.
+    command = [docker, "run", "-d", "--name", name]
     if systemd:
         # Private UTS/network namespaces isolate hostname and net.ipv4 sysctls.
         command += ["--privileged", "--cgroupns=private", "--tmpfs", "/run", "--tmpfs", "/run/lock"]
@@ -86,7 +88,7 @@ def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Call
                     raise RuntimeError(f"Container systemd failed to boot: {state}")
                 time.sleep(0.1)
 
-        with asyncio.Runner() as runner:
+        with tempfile.TemporaryFile() as stderr, asyncio.Runner() as runner:
 
             async def connect() -> tuple[asyncio.subprocess.Process, Protocol]:
                 process = await asyncio.create_subprocess_exec(
@@ -98,13 +100,20 @@ def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Call
                     "-qui",
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=stderr,
                 )
                 protocol = await Protocol.from_subprocess(process)
                 await protocol.__aenter__()
                 return process, protocol
 
-            process, protocol = runner.run(connect())
+            try:
+                process, protocol = runner.run(connect())
+            except Exception as exc:
+                stderr.seek(0)
+                exc.add_note(stderr.read().decode(errors="replace"))
+                logs = subprocess.run([docker, "logs", name], capture_output=True, text=True, timeout=5)
+                exc.add_note(logs.stdout + logs.stderr)
+                raise
             try:
 
                 def remote(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
