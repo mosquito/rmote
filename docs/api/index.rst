@@ -6,4 +6,5 @@ API Reference
 
    sync
    protocol
+   transfer
    tools/index
