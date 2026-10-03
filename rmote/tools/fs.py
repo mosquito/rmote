@@ -1,9 +1,28 @@
 import difflib
+import os
 import re
+import shutil
+import stat
+from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
 from rmote.protocol import Tool
+
+
+@dataclass(frozen=True, slots=True)
+class StatResult:
+    path: str
+    exists: bool
+    size: int = 0
+    mode: int = 0
+    uid: int = 0
+    gid: int = 0
+    mtime: float = 0.0
+    is_file: bool = False
+    is_dir: bool = False
+    is_symlink: bool = False
+    link_target: str = field(default="")
 
 
 class LineInFileMatch(IntEnum):
@@ -133,4 +152,188 @@ class FileSystem(Tool):
                 fromfile=str(p),
                 tofile=str(p),
             )
+        )
+
+    @staticmethod
+    def write(
+        path: str,
+        content: str | bytes,
+        *,
+        mode: int = 0o644,
+        owner: str | None = None,
+        group: str | None = None,
+    ) -> bool:
+        """Write *content* to *path* idempotently.
+
+        All of content, mode, owner, and group are compared to the current state.
+        Returns ``True`` if any of them differed and the file was updated.
+
+        Args:
+            path: Destination path on the remote filesystem.
+            content: File content as a string (UTF-8) or bytes.
+            mode: File permission bits (default ``0o644``).
+            owner: Owner username; ``None`` leaves ownership unchanged.
+            group: Group name; ``None`` leaves group unchanged.
+
+        Returns:
+            ``True`` if the file was created or updated, ``False`` if already
+            in the desired state.
+        """
+        import grp
+        import pwd
+
+        raw = content.encode() if isinstance(content, str) else content
+        p = Path(path)
+
+        desired_uid = pwd.getpwnam(owner).pw_uid if owner is not None else None
+        desired_gid = grp.getgrnam(group).gr_gid if group is not None else None
+
+        changed = False
+        if p.exists():
+            st = p.stat()
+            current_mode = stat.S_IMODE(st.st_mode)
+            content_match = p.read_bytes() == raw
+            mode_match = current_mode == mode
+            uid_match = desired_uid is None or st.st_uid == desired_uid
+            gid_match = desired_gid is None or st.st_gid == desired_gid
+            if content_match and mode_match and uid_match and gid_match:
+                return False
+            changed = True
+        else:
+            changed = True
+
+        p.write_bytes(raw)
+        p.chmod(mode)
+        if desired_uid is not None or desired_gid is not None:
+            os.chown(p, desired_uid if desired_uid is not None else -1, desired_gid if desired_gid is not None else -1)
+        return changed
+
+    @staticmethod
+    def directory(
+        path: str,
+        *,
+        mode: int = 0o755,
+        owner: str | None = None,
+        group: str | None = None,
+    ) -> bool:
+        """Ensure a directory exists at *path* with the given permissions.
+
+        Creates the directory (and any missing parents) if absent.  If it
+        already exists, applies *mode*, *owner*, and *group* if they differ.
+
+        Args:
+            path: Target directory path.
+            mode: Directory permission bits (default ``0o755``).
+            owner: Owner username; ``None`` leaves ownership unchanged.
+            group: Group name; ``None`` leaves group unchanged.
+
+        Returns:
+            ``True`` if the directory was created or its attributes changed.
+        """
+        import grp
+        import pwd
+
+        p = Path(path)
+        desired_uid = pwd.getpwnam(owner).pw_uid if owner is not None else None
+        desired_gid = grp.getgrnam(group).gr_gid if group is not None else None
+
+        changed = False
+        if not p.exists():
+            p.mkdir(parents=True, mode=mode)
+            p.chmod(mode)
+            changed = True
+        else:
+            st = p.stat()
+            current_mode = stat.S_IMODE(st.st_mode)
+            if current_mode != mode:
+                p.chmod(mode)
+                changed = True
+            uid_match = desired_uid is None or st.st_uid == desired_uid
+            gid_match = desired_gid is None or st.st_gid == desired_gid
+            if not uid_match or not gid_match:
+                changed = True
+
+        if desired_uid is not None or desired_gid is not None:
+            os.chown(p, desired_uid if desired_uid is not None else -1, desired_gid if desired_gid is not None else -1)
+        return changed
+
+    @staticmethod
+    def symlink(path: str, target: str) -> bool:
+        """Ensure *path* is a symlink pointing to *target*.
+
+        If *path* already exists as the correct symlink, this is a no-op.
+        If it exists as a wrong symlink or a regular file, it is replaced.
+
+        Args:
+            path: Path where the symlink should be created.
+            target: The target the symlink should point to.
+
+        Returns:
+            ``True`` if the symlink was created or updated.
+        """
+        p = Path(path)
+        if p.is_symlink():
+            if os.readlink(p) == target:
+                return False
+            p.unlink()
+        elif p.exists():
+            p.unlink()
+        os.symlink(target, p)
+        return True
+
+    @staticmethod
+    def absent(path: str, *, recursive: bool = False) -> bool:
+        """Remove *path* if it exists.
+
+        Args:
+            path: Path to remove.
+            recursive: If ``True``, remove directories and their contents
+                recursively (equivalent to ``rm -rf``).  If ``False``
+                (default), non-empty directories raise :exc:`OSError`.
+
+        Returns:
+            ``True`` if *path* existed and was removed, ``False`` if it was
+            already absent.
+        """
+        p = Path(path)
+        if not p.exists() and not p.is_symlink():
+            return False
+        if p.is_symlink() or p.is_file():
+            p.unlink()
+        elif recursive:
+            shutil.rmtree(p)
+        else:
+            p.rmdir()
+        return True
+
+    @staticmethod
+    def stat(path: str) -> StatResult:
+        """Return metadata for *path* without following symlinks.
+
+        Args:
+            path: Path to inspect.
+
+        Returns:
+            :class:`StatResult` with file metadata.  If *path* does not
+            exist, returns a :class:`StatResult` with ``exists=False`` and
+            all numeric fields set to zero.
+        """
+        p = Path(path)
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return StatResult(path=path, exists=False)
+        is_link = p.is_symlink()
+        return StatResult(
+            path=path,
+            exists=True,
+            size=st.st_size,
+            mode=stat.S_IMODE(st.st_mode),
+            uid=st.st_uid,
+            gid=st.st_gid,
+            mtime=st.st_mtime,
+            is_file=p.is_file() and not is_link,
+            is_dir=p.is_dir() and not is_link,
+            is_symlink=is_link,
+            link_target=os.readlink(p) if is_link else "",
         )

@@ -1,11 +1,13 @@
 """Tests for FileSystem tool."""
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
 from rmote.tools import FileSystem
-from rmote.tools.fs import LineInFileMatch
+from rmote.tools.fs import LineInFileMatch, StatResult
 
 
 class TestFileSystem:
@@ -183,3 +185,192 @@ class TestLineInFile:
         assert diff.startswith("---")
         assert "+++" in diff
         assert "@@" in diff
+
+
+class TestWrite:
+    def test_creates_new_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "new.txt"
+        assert FileSystem.write(str(p), "hello") is True
+        assert p.read_text() == "hello"
+
+    def test_creates_with_bytes(self, tmp_path: Path) -> None:
+        p = tmp_path / "data.bin"
+        assert FileSystem.write(str(p), b"\x00\xff") is True
+        assert p.read_bytes() == b"\x00\xff"
+
+    def test_noop_when_content_and_mode_match(self, tmp_path: Path) -> None:
+        p = tmp_path / "f.txt"
+        p.write_bytes(b"same")
+        p.chmod(0o644)
+        assert FileSystem.write(str(p), b"same", mode=0o644) is False
+        assert p.read_bytes() == b"same"
+
+    def test_changed_on_content_diff(self, tmp_path: Path) -> None:
+        p = tmp_path / "f.txt"
+        p.write_bytes(b"old")
+        p.chmod(0o644)
+        assert FileSystem.write(str(p), b"new", mode=0o644) is True
+        assert p.read_bytes() == b"new"
+
+    def test_changed_on_mode_diff(self, tmp_path: Path) -> None:
+        p = tmp_path / "f.txt"
+        p.write_bytes(b"same")
+        p.chmod(0o644)
+        assert FileSystem.write(str(p), b"same", mode=0o600) is True
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+    def test_sets_file_mode(self, tmp_path: Path) -> None:
+        p = tmp_path / "secret.txt"
+        FileSystem.write(str(p), "x", mode=0o600)
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+    def test_str_content_encoded_as_utf8(self, tmp_path: Path) -> None:
+        p = tmp_path / "utf8.txt"
+        FileSystem.write(str(p), "héllo")
+        assert p.read_bytes() == "héllo".encode()
+
+
+class TestDirectory:
+    def test_creates_directory(self, tmp_path: Path) -> None:
+        d = tmp_path / "newdir"
+        assert FileSystem.directory(str(d)) is True
+        assert d.is_dir()
+
+    def test_creates_nested_directories(self, tmp_path: Path) -> None:
+        d = tmp_path / "a" / "b" / "c"
+        assert FileSystem.directory(str(d)) is True
+        assert d.is_dir()
+
+    def test_noop_when_already_exists_with_same_mode(self, tmp_path: Path) -> None:
+        d = tmp_path / "existing"
+        d.mkdir(mode=0o755)
+        assert FileSystem.directory(str(d), mode=0o755) is False
+
+    def test_changed_on_mode_diff(self, tmp_path: Path) -> None:
+        d = tmp_path / "existing"
+        d.mkdir(mode=0o755)
+        assert FileSystem.directory(str(d), mode=0o700) is True
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+    def test_sets_directory_mode(self, tmp_path: Path) -> None:
+        d = tmp_path / "restricted"
+        FileSystem.directory(str(d), mode=0o700)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
+class TestSymlink:
+    def test_creates_symlink(self, tmp_path: Path) -> None:
+        target = tmp_path / "target.txt"
+        target.write_text("x")
+        link = tmp_path / "link"
+        assert FileSystem.symlink(str(link), str(target)) is True
+        assert link.is_symlink()
+        assert os.readlink(link) == str(target)
+
+    def test_noop_when_already_correct(self, tmp_path: Path) -> None:
+        target = tmp_path / "target.txt"
+        target.write_text("x")
+        link = tmp_path / "link"
+        os.symlink(str(target), link)
+        assert FileSystem.symlink(str(link), str(target)) is False
+
+    def test_replaces_wrong_symlink(self, tmp_path: Path) -> None:
+        t1 = tmp_path / "t1.txt"
+        t2 = tmp_path / "t2.txt"
+        t1.write_text("a")
+        t2.write_text("b")
+        link = tmp_path / "link"
+        os.symlink(str(t1), link)
+        assert FileSystem.symlink(str(link), str(t2)) is True
+        assert os.readlink(link) == str(t2)
+
+    def test_replaces_regular_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.write_text("x")
+        regular = tmp_path / "regular"
+        regular.write_text("y")
+        assert FileSystem.symlink(str(regular), str(target)) is True
+        assert regular.is_symlink()
+
+
+class TestAbsent:
+    def test_removes_file(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        assert FileSystem.absent(str(f)) is True
+        assert not f.exists()
+
+    def test_removes_symlink(self, tmp_path: Path) -> None:
+        target = tmp_path / "t"
+        target.write_text("x")
+        link = tmp_path / "link"
+        os.symlink(str(target), link)
+        assert FileSystem.absent(str(link)) is True
+        assert not link.exists()
+        assert target.exists()  # target untouched
+
+    def test_noop_when_already_absent(self, tmp_path: Path) -> None:
+        assert FileSystem.absent(str(tmp_path / "ghost")) is False
+
+    def test_removes_empty_directory(self, tmp_path: Path) -> None:
+        d = tmp_path / "emptydir"
+        d.mkdir()
+        assert FileSystem.absent(str(d)) is True
+        assert not d.exists()
+
+    def test_raises_on_non_empty_directory_without_recursive(self, tmp_path: Path) -> None:
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "file.txt").write_text("x")
+        with pytest.raises(OSError):
+            FileSystem.absent(str(d), recursive=False)
+
+    def test_removes_non_empty_directory_recursively(self, tmp_path: Path) -> None:
+        d = tmp_path / "dir"
+        d.mkdir()
+        (d / "nested").mkdir()
+        (d / "nested" / "file.txt").write_text("x")
+        assert FileSystem.absent(str(d), recursive=True) is True
+        assert not d.exists()
+
+
+class TestStat:
+    def test_existing_file(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("hello")
+        f.chmod(0o600)
+        result = FileSystem.stat(str(f))
+        assert result.exists is True
+        assert result.is_file is True
+        assert result.is_dir is False
+        assert result.is_symlink is False
+        assert result.size == 5
+        assert result.mode == 0o600
+        assert result.path == str(f)
+
+    def test_existing_directory(self, tmp_path: Path) -> None:
+        result = FileSystem.stat(str(tmp_path))
+        assert result.exists is True
+        assert result.is_dir is True
+        assert result.is_file is False
+
+    def test_symlink_not_followed(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.write_text("x")
+        link = tmp_path / "link"
+        os.symlink(str(target), link)
+        result = FileSystem.stat(str(link))
+        assert result.is_symlink is True
+        assert result.link_target == str(target)
+        assert result.is_file is False
+
+    def test_missing_path_returns_not_exists(self, tmp_path: Path) -> None:
+        result = FileSystem.stat(str(tmp_path / "ghost"))
+        assert result == StatResult(path=str(tmp_path / "ghost"), exists=False)
+
+    def test_mtime_is_float(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        result = FileSystem.stat(str(f))
+        assert isinstance(result.mtime, float)
+        assert result.mtime > 0
