@@ -103,8 +103,12 @@ packet-beta
   104-167: "packet_id - request correlator uint64 (8 bytes)"
 ```
 
-The payload is `pickle.dumps(data)`, lzma-compressed when its size exceeds 1024 bytes (the
+The payload is `pickle.dumps(data)`, gzip-compressed when its size exceeds 1024 bytes (the
 `COMPRESSED` flag is set in that case).
+
+Bootstrap also uses gzip and transfers the current protocol implementation to the remote
+interpreter. Independently started peers must use the same compression format; gzip packets
+are not compatible with older LZMA-based peers.
 
 ### Flags
 
@@ -112,7 +116,7 @@ The `flags` field is a combination of {class}`~rmote.protocol.Flags` values:
 
 | Flag         | Value | Meaning                              |
 |--------------|-------|--------------------------------------|
-| `COMPRESSED` | 1     | Payload is lzma-compressed           |
+| `COMPRESSED` | 1     | Payload is gzip-compressed           |
 | `REQUEST`    | 2     | Sender expects a response            |
 | `RESPONSE`   | 4     | This is a response to a request      |
 | `SYNC`       | 8     | Tool synchronization                 |
