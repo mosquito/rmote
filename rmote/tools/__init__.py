@@ -8,6 +8,7 @@ from rmote.tools.logger import Logger
 from rmote.tools.pacman import Pacman
 from rmote.tools.pacman_repository import PacmanRepository
 from rmote.tools.quit import Quit
+from rmote.tools.rsync import Rsync
 from rmote.tools.service import Service
 from rmote.tools.sysctl import Sysctl
 from rmote.tools.template import Template
@@ -24,6 +25,7 @@ __all__ = (
     "Pacman",
     "PacmanRepository",
     "Quit",
+    "Rsync",
     "Service",
     "Sysctl",
     "Template",
