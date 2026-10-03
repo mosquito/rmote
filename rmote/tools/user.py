@@ -91,7 +91,27 @@ class Backend:
 
 
 class User(Tool):
-    """Manage users, groups, SSH keys, and sudoers on the remote host. Requires root."""
+    """Manage users, groups, SSH keys, and sudoers on the remote host. Requires root.
+
+    Create a group and user in a disposable Debian container, then remove them::
+
+        >>> remote = getfixture("debian_tool")
+        >>> group = remote(User.group_present, "deployers")
+        >>> group.changed
+        True
+        >>> remote(User.group_present, "deployers").changed
+        False
+        >>> remote(User.present, "deploy", gid=group.gid, create_home=False).changed
+        True
+        >>> remote(User.present, "deploy", gid=group.gid, create_home=False).changed
+        False
+        >>> remote(User.absent, "deploy")
+        True
+        >>> remote(User.absent, "deploy")
+        False
+        >>> remote(User.group_absent, "deployers")
+        True
+    """
 
     @staticmethod
     def present(

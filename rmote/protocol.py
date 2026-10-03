@@ -15,7 +15,7 @@ import threading
 import tokenize
 from collections.abc import Callable, Coroutine
 from functools import cache
-from lzma import compress, decompress
+from gzip import compress, decompress
 from pathlib import Path
 from types import FunctionType
 from typing import Any, NotRequired, ParamSpec, Self, TypedDict, TypeVar, cast, overload
@@ -208,7 +208,7 @@ class LogRecord(TypedDict):
 
 def bootstrap_packer(code: bytes) -> bytes:
     with io.BytesIO() as output:
-        output.write(b"from lzma import decompress\n")
+        output.write(b"from gzip import decompress\n")
         output.write(b"from base64 import b64decode\n")
         output.write(b"\n")
         output.write(b"exec(decompress(b64decode('''")

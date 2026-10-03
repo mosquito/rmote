@@ -18,6 +18,9 @@ extensions = [
     "sphinx_copybutton",
 ]
 
+source_suffix = {".md": "markdown"}
+exclude_patterns = ["_build"]
+
 myst_enable_extensions = ["colon_fence"]
 
 html_theme = "furo"

@@ -20,6 +20,24 @@ class AptRepository(Tool):
     Repository sources are written as DEB822 ``.sources`` files under
     ``/etc/apt/sources.list.d/``. GPG keyrings are stored in
     ``/etc/apt/keyrings/``. All operations are idempotent and require root.
+
+
+    Write and remove a real source definition inside a disposable Debian container.
+    The example URI is only written to disk; it is not contacted::
+
+        >>> from rmote.tools import FileSystem
+        >>> remote = getfixture("debian_tool")
+        >>> options = dict(uris=["https://repo.example/debian"], suites=["stable"], components=["main"])
+        >>> remote(AptRepository.present, "example", **options).changed
+        True
+        >>> remote(AptRepository.present, "example", **options).changed
+        False
+        >>> "Suites: stable" in remote(FileSystem.read_str, "/etc/apt/sources.list.d/example.sources")
+        True
+        >>> remote(AptRepository.absent, "example").changed
+        True
+        >>> remote(AptRepository.absent, "example").changed
+        False
     """
 
     @staticmethod

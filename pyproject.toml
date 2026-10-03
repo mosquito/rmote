@@ -71,8 +71,9 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
+addopts = ["--doctest-modules"]
 markers = ["docker: requires Docker containers"]
-testpaths = ["tests", "docs", "README.md"]
+testpaths = ["tests", "rmote", "docs", "README.md"]
 pythonpath = ["."]
 
 [tool.ruff]

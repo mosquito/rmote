@@ -7,6 +7,17 @@ class Template(Tool):
 
     All three methods execute on the remote process.
     See :doc:`/templating` for a full description of the template syntax.
+
+
+    Render locally to check a template before sending it to a host::
+
+        >>> Template.render("Hello, ${name}!", name="Ada")
+        'Hello, Ada!'
+        >>> compiled = TemplateRenderer("port=${port}")
+        >>> Template.render_compiled(compiled, port=8080)
+        'port=8080'
+        >>> Template.render("% for name in names:\\n${name}\\n% endfor", names=["web", "db"])
+        'web\\ndb'
     """
 
     @staticmethod

@@ -28,6 +28,7 @@ the connector.
 |---|---|
 | Write a remote operation and return Python data | {doc}`writing-tools` |
 | Apply an operation to several hosts | {doc}`multi-host` |
+| Synchronize file contents in either direction | {doc}`api/tools/file_sync` |
 | Render a configuration file | {doc}`templating` |
 | Find a built-in operation | {doc}`api/tools/index` |
 | Configure synchronous connections and deadlines | {doc}`api/sync` |

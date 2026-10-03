@@ -86,7 +86,27 @@ class Backend:
 
 
 class Service(Tool):
-    """Manage systemd services on the remote host. Requires systemd and root."""
+    """Manage systemd services on the remote host. Requires systemd and root.
+
+    Start and enable a real systemd unit in a disposable Debian container::
+
+        >>> from rmote.tools import Exec, FileSystem
+        >>> remote = getfixture("debian_tool")
+        >>> unit = "[Service]\\nExecStart=/bin/sleep infinity\\n[Install]\\nWantedBy=multi-user.target\\n"
+        >>> remote(FileSystem.write, "/etc/systemd/system/example.service", unit)
+        True
+        >>> _ = remote(Exec.command, "systemctl", "daemon-reload")
+        >>> result = remote(Service.converge, "example.service", started=True, enabled=True)
+        >>> result.started, result.enabled, result.changed
+        (True, True, True)
+        >>> remote(Service.converge, "example.service", started=True, enabled=True).changed
+        False
+        >>> result = remote(Service.converge, "example.service", started=False, enabled=False)
+        >>> result.started, result.enabled, result.changed
+        (False, False, True)
+        >>> remote(Service.converge, "example.service", started=False, enabled=False).changed
+        False
+    """
 
     @staticmethod
     def status(name: str) -> Result:

@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.DEBUG, format="%(name)s - %(levelname)s - %(me
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption("--no-docker", action="store_true", help="Skip tests that require Docker.")
     parser.addoption("--require-ssh", action="store_true", help="Fail if the local SSH integration cannot run.")
 
 

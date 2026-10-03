@@ -1,7 +1,10 @@
 """Low-level protocol tests for error cases and edge coverage"""
 
 import asyncio
+import gzip
+import pickle
 import struct
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -53,6 +56,31 @@ class TestProtocolLowLevel:
         with pytest.raises(ValueError, match="Compression flag must not be set"):
             await proto.send({"test": "data"}, Flags.COMPRESSED, 1)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("size", [32, 2048])
+    async def test_packet_encoding_and_roundtrip(self, size: int) -> None:
+        writer = Mock(spec=asyncio.StreamWriter)
+        writer.is_closing.return_value = False
+        writer.drain = AsyncMock()
+        reader = asyncio.StreamReader()
+        proto = BaseProtocol(reader, writer)
+        packet = b"x" * size
+        await proto.send(packet, Flags.RPC | Flags.REQUEST, 42)
+        wire = writer.write.call_args.args[0]
+        magic, flags, length, packet_id = proto.PACKET_HEADER.unpack(wire[: proto.PACKET_HEADER.size])
+        payload = wire[proto.PACKET_HEADER.size :]
+        assert (magic, length, packet_id) == (proto.MAGIC, len(payload), 42)
+        if size > proto.COMPRESSION_THRESHOLD:
+            assert flags == Flags.RPC | Flags.REQUEST | Flags.COMPRESSED
+            assert payload.startswith(b"\x1f\x8b")
+            assert gzip.decompress(payload) == pickle.dumps(packet)
+        else:
+            assert flags == Flags.RPC | Flags.REQUEST
+            assert payload == pickle.dumps(packet)
+        reader.feed_data(wire)
+        reader.feed_eof()
+        assert await proto.receive() == (packet, Flags(flags), 42)
+
 
 class TestToolSerializationEdgeCases:
     def test_tool_from_dict_with_bases(self) -> None:
@@ -98,13 +126,15 @@ class TestToolSerializationEdgeCases:
 
 
 class TestBootstrapPacker:
-    def test_bootstrap_packer_output(self) -> None:
+    def test_bootstrap_packer_output(self, capsys) -> None:
         packed = bootstrap_packer(b"print('hello')")
 
-        assert b"from lzma import decompress" in packed
+        assert b"from gzip import decompress" in packed
         assert b"from base64 import b64decode" in packed
         assert b"exec(decompress(b64decode('''" in packed
-        assert packed.startswith(b"from lzma import decompress\n")
+        assert packed.startswith(b"from gzip import decompress\n")
+        exec(packed, {})
+        assert capsys.readouterr().out == "hello\n"
 
 
 class TestHighLevelProtocolEdgeCases:
