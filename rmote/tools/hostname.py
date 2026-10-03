@@ -8,7 +8,25 @@ _PROC_HOSTNAME = Path("/proc/sys/kernel/hostname")
 
 
 class Hostname(Tool):
-    """Manage system hostname and ``/etc/hosts`` entries. Requires root for mutating operations."""
+    """Manage system hostname and ``/etc/hosts`` entries. Requires root for mutating operations.
+
+    Change the hostname in a disposable container with its own UTS namespace::
+
+        >>> from rmote.tools import FileSystem
+        >>> remote = getfixture("debian_tool")
+        >>> remote(Hostname.set, "rmote-example")
+        True
+        >>> remote(Hostname.set, "rmote-example")
+        False
+        >>> remote(Hostname.get)
+        'rmote-example'
+        >>> remote(FileSystem.read_str, "/etc/hostname").strip()
+        'rmote-example'
+        >>> remote(Hostname.hosts_entry, "192.0.2.1", "web")
+        True
+        >>> remote(Hostname.hosts_entry, "192.0.2.1", "web")
+        False
+    """
 
     @staticmethod
     def get() -> str:

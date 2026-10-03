@@ -79,7 +79,20 @@ class Backend:
 
 
 class Pacman(Tool):
-    """Manage Arch Linux packages via pacman. Requires root on the remote host."""
+    """Manage Arch Linux packages via pacman. Requires root on the remote host.
+
+    Install and remove a package in a disposable Arch Linux container::
+
+        >>> remote = getfixture("arch_tool")
+        >>> remote(Pacman.package, "nano").changed
+        True
+        >>> remote(Pacman.package, "nano").changed
+        False
+        >>> remote(Pacman.package, "nano", state=State.ABSENT).changed
+        True
+        >>> remote(Pacman.package, "nano", state=State.ABSENT).changed
+        False
+    """
 
     @staticmethod
     def update(ttl: int | float = -1) -> bool:

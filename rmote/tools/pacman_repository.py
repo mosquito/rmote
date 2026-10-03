@@ -39,6 +39,24 @@ class PacmanRepository(Tool):
     Repository sections are read from and written to ``/etc/pacman.conf``.
     GPG key files are stored in ``/etc/pacman.d/``. All operations are
     idempotent and require root.
+
+
+    Update pacman.conf inside a disposable Arch Linux container. The example
+    repository is only written to disk; it is not contacted::
+
+        >>> from rmote.tools import FileSystem
+        >>> remote = getfixture("arch_tool")
+        >>> options = dict(servers=["https://repo.example/$arch"], sig_level="Required DatabaseOptional")
+        >>> remote(PacmanRepository.present, "example", **options).changed
+        True
+        >>> remote(PacmanRepository.present, "example", **options).changed
+        False
+        >>> "[example]" in remote(FileSystem.read_str, "/etc/pacman.conf")
+        True
+        >>> remote(PacmanRepository.absent, "example").changed
+        True
+        >>> remote(PacmanRepository.absent, "example").changed
+        False
     """
 
     @staticmethod

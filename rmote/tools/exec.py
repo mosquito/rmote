@@ -5,7 +5,19 @@ from rmote.protocol import Tool, process
 
 
 class Exec(Tool):
-    """Run commands and shell expressions on the remote host."""
+    """Run commands and shell expressions on the remote host.
+
+    Capture binary output and inspect nonzero exit codes without a shell::
+
+        >>> import sys
+        >>> result = Exec.command(sys.executable, "-c", "print('hello')", capture_output=True)
+        >>> result.returncode, result.stdout
+        (0, b'hello\\n')
+        >>> Exec.command(sys.executable, "-c", "raise SystemExit(3)", check=False).returncode
+        3
+        >>> Exec.shell("printf '%s' hello", capture_output=True).stdout
+        b'hello'
+    """
 
     @staticmethod
     def command(

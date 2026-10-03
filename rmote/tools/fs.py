@@ -38,7 +38,27 @@ class LineInFileMatch(IntEnum):
 
 
 class FileSystem(Tool):
-    """Remote filesystem operations - read, glob, and idempotent line-in-file."""
+    """Remote filesystem operations - read, glob, and idempotent line-in-file.
+
+    Example using disposable files (the same methods can be called remotely)::
+
+        >>> from tempfile import TemporaryDirectory
+        >>> with TemporaryDirectory() as directory:
+        ...     path = str(Path(directory) / "app.conf")
+        ...     print(FileSystem.write(path, "enabled=no\\n"))
+        ...     print(FileSystem.write(path, "enabled=no\\n"))
+        ...     diff = FileSystem.line_in_file(path, line="enabled=yes", regexp="^enabled=")
+        ...     print(bool(diff), FileSystem.read_str(path).strip())
+        ...     print(FileSystem.line_in_file(path, line="enabled=yes", regexp="^enabled="))
+        ...     print(FileSystem.stat(path).is_file)
+        ...     print(FileSystem.absent(path), FileSystem.absent(path))
+        True
+        False
+        True enabled=yes
+        <BLANKLINE>
+        True
+        True False
+    """
 
     @staticmethod
     def read_bytes(path: str) -> bytes:

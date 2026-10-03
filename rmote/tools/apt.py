@@ -106,7 +106,23 @@ class Backend:
 
 
 class Apt(Tool):
-    """Manage Debian/Ubuntu packages via apt-get. Requires root on the remote host."""
+    """Manage Debian/Ubuntu packages via apt-get. Requires root on the remote host.
+
+    Install and remove a package in a disposable Debian container. ``remote``
+    is the fixture's synchronous RPC callable (like a ``Connection``)::
+
+        >>> remote = getfixture("debian_tool")
+        >>> remote(Apt.update)
+        True
+        >>> remote(Apt.package, "nano").changed
+        True
+        >>> remote(Apt.package, "nano").changed
+        False
+        >>> remote(Apt.package, "nano", state=State.ABSENT).changed
+        True
+        >>> remote(Apt.package, "nano", state=State.ABSENT).changed
+        False
+    """
 
     @staticmethod
     def update(ttl: int | float = -1) -> bool:

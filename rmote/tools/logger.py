@@ -9,6 +9,22 @@ class Logger(Tool):
 
     Log records emitted on the remote side are forwarded over the protocol channel
     and appear locally under the ``rmote.remote.<name>`` logger hierarchy.
+
+
+    Level names are case-insensitive. Restore the original level after this local
+    example so running the documentation does not change application logging::
+
+        >>> original_level = logging.getLogger().level
+        >>> try:
+        ...     Logger.set_log_level("error")
+        ...     print(logging.getLogger().level == logging.ERROR)
+        ... finally:
+        ...     logging.getLogger().setLevel(original_level)
+        True
+        >>> Logger.log("invalid", "message")
+        Traceback (most recent call last):
+            ...
+        ValueError: Invalid log level: invalid
     """
 
     @staticmethod

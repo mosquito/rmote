@@ -73,6 +73,26 @@ class Sysctl(Tool):
         # custom directory via subclass
         class MySysctl(Sysctl):
             CONF_DIR = Path("/etc/sysctl.d")
+
+
+    Change a namespaced network parameter in a disposable container. The example
+    checks the runtime value, persistent configuration and repeated application::
+
+        >>> from rmote.tools import FileSystem
+        >>> remote = getfixture("debian_tool")
+        >>> value = "0" if remote(Sysctl.get, "net.ipv4.ip_forward") == "1" else "1"
+        >>> remote(Sysctl.present, "net.ipv4.ip_forward", value).changed
+        True
+        >>> remote(Sysctl.get, "net.ipv4.ip_forward") == value
+        True
+        >>> "net.ipv4.ip_forward = " + value in remote(FileSystem.read_str, "/etc/sysctl.d/99-rmote.conf")
+        True
+        >>> remote(Sysctl.present, "net.ipv4.ip_forward", value).changed
+        False
+        >>> remote(Sysctl.absent, "net.ipv4.ip_forward")
+        True
+        >>> remote(Sysctl.absent, "net.ipv4.ip_forward")
+        False
     """
 
     CONF_DIR: ClassVar[Path] = Path("/etc/sysctl.d")
