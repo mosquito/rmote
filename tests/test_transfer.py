@@ -2,14 +2,11 @@
 
 import asyncio
 import hashlib
-from pathlib import Path
-from typing import Literal
 
 import pytest
 
-from rmote.sync import Connection
-from rmote.tools.file_sync import FileSync
-from rmote.transfer import async_download, async_upload, download, upload
+from rmote.tools import FileSync
+from rmote.tools.file_sync import Session
 
 
 @pytest.mark.asyncio
@@ -38,14 +35,16 @@ async def test_transfer(protocol, tmp_path, direction, original, desired, transf
     payloads = []
 
     async def remote(method, *args):
-        if method == FileSync.write:
+        if method == FileSync._step and isinstance(args[1], bytes):
             payloads.append(args[1])
         result = await protocol(method, *args)
-        if method == FileSync.data:
+        if method == FileSync._step and isinstance(result, bytes):
             payloads.append(result)
         return result
 
-    result = await (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
+    result = await (FileSync.upload if direction == "upload" else FileSync.download)(
+        remote, source, target, block_size=4
+    )
     assert target.read_bytes() == desired
     assert result.size == len(desired)
     assert result.transferred == transferred
@@ -62,17 +61,6 @@ async def test_transfer(protocol, tmp_path, direction, original, desired, transf
     assert not FileSync._sessions
 
 
-@pytest.mark.parametrize("direction", ["upload", "download"])
-def test_sync_connection(tmp_path: Path, direction: Literal["upload", "download"]) -> None:
-    source, target = tmp_path / "source", tmp_path / "target"
-    source.write_bytes(b"test" * 20)
-    with Connection.from_local() as connection:
-        result = (upload if direction == "upload" else download)(connection, source, target, block_size=8)
-        assert result.changed
-        assert not (upload if direction == "upload" else download)(connection, source, target, block_size=8).changed
-    assert source.read_bytes() == target.read_bytes()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direction", ["upload", "download"])
 @pytest.mark.parametrize("failure", ["corrupt", "source_changed", "target_changed", "rpc", "cancel"])
@@ -87,24 +75,12 @@ async def test_failure_preserves_target(protocol, tmp_path, direction, failure):
     async def remote(method, *args):
         nonlocal touched
         tokens.add(args[0])
-        if method == FileSync.write and failure == "corrupt":
+        if method == FileSync._step and isinstance(args[1], bytes) and failure == "corrupt":
             args = (args[0], b"xxxx")
         result = await protocol(method, *args)
-        if method == FileSync.data and failure == "corrupt":
+        if method == FileSync._step and isinstance(result, bytes) and failure == "corrupt":
             return b"xxxx"
-        if method == FileSync.match and not touched:
-            touched = True
-            if failure == "source_changed":
-                source.write_bytes(b"changed!")
-            elif failure == "target_changed":
-                target.write_bytes(b"external")
-            elif failure == "rpc":
-                raise RuntimeError("Injected RPC failure")
-            elif failure == "cancel":
-                assert task is not None
-                task.cancel()
-        # Download's match happens locally; intercept its source signature instead.
-        if direction == "download" and method == FileSync.signature and not touched:
+        if method == FileSync._step and not touched:
             touched = True
             if failure == "source_changed":
                 source.write_bytes(b"changed!")
@@ -118,7 +94,7 @@ async def test_failure_preserves_target(protocol, tmp_path, direction, failure):
         return result
 
     task = asyncio.create_task(
-        (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
+        (FileSync.upload if direction == "upload" else FileSync.download)(remote, source, target, block_size=4)
     )
     with pytest.raises((RuntimeError, ValueError, asyncio.CancelledError)):
         await task
@@ -128,7 +104,7 @@ async def test_failure_preserves_target(protocol, tmp_path, direction, failure):
     # Closed remote sessions cannot provide a source block.
     for token in tokens:
         with pytest.raises(KeyError):
-            await protocol(FileSync.data, token)
+            await protocol(FileSync._step, token)
 
 
 @pytest.mark.asyncio
@@ -141,7 +117,7 @@ async def test_rejects_symlinks(protocol, tmp_path, which):
     path.unlink(missing_ok=True)
     path.symlink_to(other)
     with pytest.raises(OSError):
-        await async_upload(protocol, source, target)
+        await FileSync.upload(protocol, source, target)
     assert other.read_bytes() == b"untouched"
     assert path.is_symlink()
     assert not list(tmp_path.glob(".*.rmote-*"))
@@ -150,7 +126,7 @@ async def test_rejects_symlinks(protocol, tmp_path, which):
 @pytest.mark.asyncio
 async def test_missing_source(protocol, tmp_path):
     with pytest.raises(FileNotFoundError):
-        await async_upload(protocol, tmp_path / "missing", tmp_path / "target")
+        await FileSync.upload(protocol, tmp_path / "missing", tmp_path / "target")
     assert not (tmp_path / "target").exists()
 
 
@@ -158,24 +134,23 @@ async def test_missing_source(protocol, tmp_path):
 @pytest.mark.parametrize("block_size", [0, -1, 16 * 1024 * 1024 + 1])
 async def test_invalid_block_size(protocol, tmp_path, block_size):
     with pytest.raises(ValueError, match="block_size"):
-        await async_upload(protocol, tmp_path / "missing", tmp_path / "target", block_size=block_size)
+        await FileSync.upload(protocol, tmp_path / "missing", tmp_path / "target", block_size=block_size)
 
 
 def test_final_digest_and_incomplete_transfer(tmp_path):
     target = tmp_path / "target"
     target.write_bytes(b"old!")
-    token = "digest-test"
-    FileSync.begin(token, str(target), True, 4, 4)
+    session = Session(str(target), True, 4, 4)
     try:
         with pytest.raises(ValueError, match="Incomplete"):
-            FileSync.finish(token, hashlib.sha256(b"new!").digest())
-        assert not FileSync.match(token, 4, hashlib.sha256(b"new!").digest())
-        FileSync.write(token, b"new!")
+            session.step((0, hashlib.sha256(b"new!").digest()))
+        assert not session.step((4, hashlib.sha256(b"new!").digest()))
+        session.step(b"new!")
         with pytest.raises(ValueError, match="digest mismatch"):
-            FileSync.finish(token, hashlib.sha256(b"wrong").digest())
+            session.step((0, hashlib.sha256(b"wrong").digest()))
         assert target.read_bytes() == b"old!"
     finally:
-        FileSync.close(token)
+        session.close()
     assert not list(tmp_path.glob(".*.rmote-*"))
 
 
@@ -189,15 +164,17 @@ async def test_target_unchanged_until_commit(protocol, tmp_path, direction):
     seen = []
 
     async def remote(method, *args):
-        if method not in (FileSync.close, FileSync.finish):
+        if method != FileSync._close:
             assert target.read_bytes() == b"AAAABBBB"
             assert target.stat().st_ino == original_inode
         result = await protocol(method, *args)
-        if method in (FileSync.match, FileSync.data):
+        if method == FileSync._step:
             seen.append(method)
         return result
 
-    result = await (async_upload if direction == "upload" else async_download)(remote, source, target, block_size=4)
+    result = await (FileSync.upload if direction == "upload" else FileSync.download)(
+        remote, source, target, block_size=4
+    )
     assert seen
     assert result.transferred == 4
     assert result.reused == 4
@@ -210,26 +187,75 @@ def test_replace_failure_preserves_original(tmp_path, monkeypatch):
 
     target = tmp_path / "target"
     target.write_bytes(b"old!")
-    token = "replace-failure"
     digest = hashlib.sha256(b"new!").digest()
-    FileSync.begin(token, str(target), True, 4, 4)
+    session = Session(str(target), True, 4, 4)
     try:
-        assert not FileSync.match(token, 4, digest)
-        FileSync.write(token, b"new!")
+        assert not session.step((4, digest))
+        session.step(b"new!")
 
         def fail(*args):
             raise OSError("Injected replace failure")
 
         monkeypatch.setattr(os, "replace", fail)
         with pytest.raises(OSError, match="replace failure"):
-            FileSync.finish(token, digest)
+            session.step((0, digest))
         assert target.read_bytes() == b"old!"
     finally:
-        FileSync.close(token)
+        session.close()
     assert not list(tmp_path.glob(".*.rmote-*"))
 
 
 @pytest.mark.asyncio
-async def test_sync_helper_rejects_event_loop(tmp_path):
-    with pytest.raises(RuntimeError, match="async_upload or async_download"):
-        upload(lambda *args: None, tmp_path / "a", tmp_path / "b")
+async def test_round_trip_and_incremental_update(protocol, tmp_path):
+    source, remote, copy = (tmp_path / name for name in ("source", "remote", "copy"))
+    block_size = 1024 * 1024
+    original = bytes(range(256)) * (2 * block_size // 256) + b"tail"
+    source.write_bytes(original)
+    first = await FileSync.upload(protocol, source, remote)
+    assert first.transferred == len(original)
+    assert (await FileSync.download(protocol, remote, copy)).transferred == len(original)
+    assert copy.read_bytes() == original
+    assert not (await FileSync.upload(protocol, source, remote)).changed
+    assert not (await FileSync.download(protocol, remote, copy)).changed
+
+    with source.open("r+b") as stream:
+        stream.seek(block_size + 1)
+        stream.write(b"!")
+    for result in (
+        await FileSync.upload(protocol, source, remote),
+        await FileSync.download(protocol, remote, copy),
+    ):
+        assert result.transferred == block_size
+        assert result.reused == len(original) - block_size
+    assert copy.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transfers_share_protocol(protocol, tmp_path):
+    a, b, remote_a, remote_b, copy = (tmp_path / name for name in ("a", "b", "remote-a", "remote-b", "copy"))
+    a.write_bytes(b"abcd" * 8)
+    b.write_bytes(b"xyz" * 9)
+    await FileSync.upload(protocol, a, remote_a, block_size=4)
+    uploaded, downloaded = await asyncio.gather(
+        FileSync.upload(protocol, b, remote_b, block_size=3),
+        FileSync.download(protocol, remote_a, copy, block_size=4),
+    )
+    assert uploaded.transferred == len(b.read_bytes())
+    assert downloaded.transferred == len(a.read_bytes())
+    assert remote_b.read_bytes() == b.read_bytes()
+    assert copy.read_bytes() == a.read_bytes()
+    assert not list(tmp_path.glob(".*.rmote-*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["upload", "download"])
+async def test_missing_destination_parent_cleans_up(protocol, tmp_path, direction):
+    source = tmp_path / "source"
+    source.write_bytes(b"data")
+    with pytest.raises(FileNotFoundError):
+        await (FileSync.upload if direction == "upload" else FileSync.download)(
+            protocol, source, tmp_path / "missing" / "target"
+        )
+    assert source.read_bytes() == b"data"
+    assert not (tmp_path / "missing").exists()
+    assert not list(tmp_path.glob(".*.rmote-*"))

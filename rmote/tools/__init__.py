@@ -1,6 +1,7 @@
 from rmote.tools.apt import Apt
 from rmote.tools.apt_repository import AptRepository
 from rmote.tools.exec import Exec
+from rmote.tools.file_sync import FileSync
 from rmote.tools.fs import FileSystem
 from rmote.tools.hostname import Hostname
 from rmote.tools.logger import Logger
@@ -17,6 +18,7 @@ __all__ = (
     "AptRepository",
     "Exec",
     "FileSystem",
+    "FileSync",
     "Hostname",
     "Logger",
     "Pacman",
