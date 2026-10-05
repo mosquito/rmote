@@ -303,6 +303,32 @@ async def test_excluded_paths_survive_delete_and_metadata(sync, tmp_path):
     assert not (await sync(source, target, delete=True, exclude=(".git/", "*.pyc"))).changed
 
 
+async def test_delete_excluded_removes_protected_subtrees_and_links(sync, tmp_path):
+    source, target, outside = (tmp_path / name for name in ("src", "dst", "outside"))
+    source.mkdir()
+    target.mkdir()
+    outside.mkdir()
+    (outside / "keep").write_text("outside")
+    (source / "file").write_text("copy")
+    for root in (source, target):
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text(str(root))
+        (root / "ignored.pyc").write_text(str(root))
+    # Excluded sources must not be traversed, even when deletion is requested.
+    os.mkfifo(source / ".git" / "pipe")
+    (target / "extra" / "nested").mkdir(parents=True)
+    (target / "extra" / "nested" / "keep.pyc").touch()
+    (target / "link.pyc").symlink_to(outside, target_is_directory=True)
+    result = await sync(source, target, exclude=(".git/", "*.pyc"), delete_excluded=True)
+    assert result.changed and result.deleted == 7 and result.files == 1
+    assert sorted(path.name for path in target.iterdir()) == ["file"]
+    assert (target / "file").read_text() == "copy"
+    assert (outside / "keep").read_text() == "outside"
+    assert (source / "ignored.pyc").read_text() == str(source)
+    assert (source / ".git" / "config").read_text() == str(source)
+    assert not (await sync(source, target, exclude=(".git/", "*.pyc"), delete_excluded=True)).changed
+
+
 @pytest.mark.parametrize("direction", ["upload", "download"])
 async def test_excluded_directories_are_not_scanned(protocol, tmp_path, monkeypatch, direction):
     source, target = tmp_path / "src", tmp_path / "dst"

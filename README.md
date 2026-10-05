@@ -89,6 +89,7 @@ you can define your own `Tool` in the console. See the
 
 ## Guides
 
+- [Synchronization CLI](https://docs.rmote.org/rsync.html): `rmote rsync -r 'ssh -T host' ./source remote:/destination`, or the reverse direction.
 - [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
 - [Interactive shell](https://docs.rmote.org/shell.html): run a shell on a host through any transport command.
 - [Multiple hosts](https://docs.rmote.org/multi-host.html): run operations concurrently and handle individual failures.

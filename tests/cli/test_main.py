@@ -83,8 +83,14 @@ def test_shell_dispatch_preserves_bytes_transport_and_exit_status(cli: list[str]
 
 @pytest.mark.parametrize(
     "command, option",
-    [([], b"shell"), (["shell"], b"--no-pty"), (["sshmux"], b"--socket"), (["repl"], b"--async")],
-    ids=["root", "shell", "mux", "repl"],
+    [
+        ([], b"shell"),
+        (["shell"], b"--no-pty"),
+        (["sshmux"], b"--socket"),
+        (["repl"], b"--async"),
+        (["rsync"], b"--exec"),
+    ],
+    ids=["root", "shell", "mux", "repl", "rsync"],
 )
 def test_help(cli: list[str], command: list[str], option: bytes) -> None:
     result = subprocess.run([*cli, *command, "--help"], capture_output=True, timeout=10)

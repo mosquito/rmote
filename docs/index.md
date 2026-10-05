@@ -30,6 +30,7 @@ the connector.
 | Collect and cache host state | {doc}`api/tools/facts` |
 | Apply an operation to several hosts | {doc}`multi-host` |
 | Synchronize file contents in either direction | {doc}`api/tools/file_sync` |
+| Synchronize files or trees from the command line | {doc}`rsync` |
 | Render a configuration file | {doc}`templating` |
 | Write and transfer a custom template filter | {doc}`template-filters` |
 | Find a built-in operation | {doc}`api/tools/index` |
@@ -49,6 +50,7 @@ client unpickles returned data.
 quickstart
 writing-tools
 repl
+rsync
 shell
 sshmux
 multi-host
