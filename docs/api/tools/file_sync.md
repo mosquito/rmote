@@ -1,5 +1,8 @@
 # FileSync
 
+FileSync uses the same {doc}`transports <../../transports>` as other rmote tools,
+including SSH, Docker/Kubernetes exec, local Python and prepared byte streams.
+
 ```{eval-rst}
 .. autoclass:: rmote.tools.file_sync.FileSync
    :members: upload, download

@@ -4,6 +4,9 @@ Import `Connection` from `rmote.sync`.
 Create a connection with `from_local`, `from_command` or `from_ssh`. Direct construction
 with `Connection()` raises `TypeError`.
 
+See {doc}`../transports` for SSH, Docker/Kubernetes exec, local Python and relay
+adapters. The same connection API and tool calls apply to each transport.
+
 ```{eval-rst}
 .. py:class:: Connection
    :module: rmote.sync

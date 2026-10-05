@@ -7,8 +7,11 @@
 [![Tests](https://github.com/mosquito/rmote/actions/workflows/tests.yml/badge.svg)](https://github.com/mosquito/rmote/actions/workflows/tests.yml)
 [![Docs](https://github.com/mosquito/rmote/actions/workflows/docs.yml/badge.svg)](https://docs.rmote.org)
 
-rmote runs Python functions on another machine over SSH. Use its built-in tools
-to manage files, packages, and services, or write a tool for your application.
+rmote runs Python functions through SSH, `docker exec`, `kubectl exec`, or a
+local Python subprocess. Any bidirectional stream that reaches a Python
+interpreter can carry its protocol, including an appropriately connected `nc`
+relay. See [Transports](https://docs.rmote.org/transports.html) for setup and examples.
+Use its built-in tools to manage files, packages, and services, or write a tool for your application.
 Calls return Python values and propagate remote exceptions to the caller.
 
 Install rmote on your local machine. The target needs Python 3.11 or newer,
@@ -89,6 +92,7 @@ you can define your own `Tool` in the console. See the
 
 ## Guides
 
+- [Transports](https://docs.rmote.org/transports.html): SSH, Docker, Kubernetes, local Python and prepared byte streams.
 - [Synchronization CLI](https://docs.rmote.org/rsync.html): `rmote rsync -r 'ssh -T host' ./source remote:/destination`, or the reverse direction.
 - [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
 - [Interactive shell](https://docs.rmote.org/shell.html): run a shell on a host through any transport command.

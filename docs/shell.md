@@ -29,6 +29,9 @@ agent and no package installation are required.
 
 ## The transport is a command
 
+The common {doc}`transports` guide covers command prefixes, local Python,
+prepared streams such as `nc`, and the requirements for carrying protocol bytes.
+
 Everything after the client options is the transport command. rmote appends the
 interpreter and its flags, so `rmote shell ssh server` runs
 `ssh server python3 -qui`.

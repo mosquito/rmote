@@ -268,7 +268,8 @@ payloads; restoring a custom filter executes its class source.
 ## Render remotely with your filters
 
 The following example renders in a separate local Python process. Use
-`Connection.from_ssh("user@server")` in the same place to render on an SSH host:
+`Connection.from_ssh("user@server")` in the same place to render on an SSH host,
+or select another of rmote's {doc}`transports`:
 
 <!-- name: test_custom_filter_remote; fixtures: tool_examples, client_resources; mark: timeout(20) -->
 ```python

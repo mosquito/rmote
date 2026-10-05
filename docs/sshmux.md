@@ -105,6 +105,10 @@ ssh -F /dev/null -S ~/.ssh/container.sock -O exit container
 
 ## Transport and destination
 
+The connection to the target uses rmote's common {doc}`transports`. SSH is the
+client interface to the mux socket; the underlying transport can reach Python
+through SSH, Docker/Kubernetes exec, a local process or a prepared byte stream.
+
 Everything after the server options is the transport command. rmote appends
 `python3 -qui`; use `-p` / `--python` to choose another interpreter. With no transport,
 the interpreter runs locally:

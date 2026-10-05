@@ -6,6 +6,8 @@ and top-level `await`, like `python -m asyncio`.
 
 ## Connect
 
+Choose any of rmote's common {doc}`transports`; the console interface stays the same.
+
 ```bash
 rmote repl                                      # local Python subprocess
 rmote repl -- ssh -T server

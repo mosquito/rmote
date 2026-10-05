@@ -1,8 +1,10 @@
 # rmote
 
-rmote runs Python functions on another machine over SSH. Built-in tools manage
-files, commands, packages, services, and users. You can also define your own
-tools and return Python values from them.
+rmote runs Python functions through SSH, `docker exec`, `kubectl exec`, a
+local Python process, or another bidirectional stream connected to Python.
+See {doc}`transports` for the common model, including prepared `nc` relays.
+Built-in tools manage files, commands, packages, services, and users. You can
+also define your own tools and return Python values from them.
 
 Install rmote locally with Python 3.11 or newer:
 
@@ -25,6 +27,7 @@ the connector.
 
 | Task | Guide |
 |---|---|
+| Connect through SSH, containers, local Python or another byte stream | {doc}`transports` |
 | Write a remote operation and return Python data | {doc}`writing-tools` |
 | Explore a host from a Python console | {doc}`repl` |
 | Collect and cache host state | {doc}`api/tools/facts` |
@@ -48,6 +51,7 @@ client unpickles returned data.
 :caption: User Guide
 
 quickstart
+transports
 writing-tools
 repl
 rsync

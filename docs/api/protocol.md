@@ -6,6 +6,10 @@ Use `Protocol` from an asynchronous application. Enter its async context
 before calling tools. See {doc}`../quickstart` for a complete connection example
 and {doc}`../concepts` for subprocess ownership and cancellation.
 
+The {doc}`transport guide <../transports>` explains command prefixes, local
+Python and prepared streams such as `nc`, including when to use
+`from_command` or `from_subprocess`.
+
 ```{eval-rst}
 .. autoclass:: rmote.protocol.Protocol
    :members:

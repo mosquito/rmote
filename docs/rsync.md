@@ -4,7 +4,9 @@
 containers that have **only Python 3.11+ and its standard library** available.
 Install rmote on the machine where you run the command. The remote side needs
 no `rsync` executable, rmote installation, third-party Python packages or
-separately installed agent.
+separately installed agent. It uses the same {doc}`transports` as every other
+rmote tool: SSH, `docker exec`, `kubectl exec`, local Python, or a prepared
+byte stream such as an `nc` relay connected to Python.
 
 This is useful for copying a project into a minimal Python container,
 deploying files to a host, or downloading results without first provisioning
@@ -33,6 +35,10 @@ rmote rsync --exec 'ssh -T server' remote:/srv/project ./copy
 
 # Use a running container.
 rmote rsync -r 'docker exec -i my-container' ./project remote:/app
+
+# Use a Kubernetes pod or a local Python subprocess.
+rmote rsync -r 'kubectl exec -i pod/my-pod --' ./project remote:/app
+rmote rsync ./project remote:./project-copy
 
 # Copy an individual file, in either direction.
 rmote rsync -r 'ssh -T server' ./config.ini remote:/etc/app/config.ini

@@ -91,10 +91,11 @@ calling loop. Cancelling a `to_thread` await does not stop its worker thread.
 
 ## Bootstrap Flow
 
-For an SSH connection, the local client starts `ssh -T host python3 -qui` (with
-the configured SSH options and Python command). The remote needs a compatible
-Python interpreter; installing rmote or copying the tool project there is not
-required. The SSH process carries the interpreter's stdin/stdout stream.
+The chosen {doc}`transport <transports>` connects the client to a Python
+interpreter's stdin/stdout stream. For example, an SSH connection starts
+`ssh -T host python3 -qui`; Docker/Kubernetes exec and local subprocesses carry
+the same bootstrap. The target needs a compatible Python interpreter;
+installing rmote or copying the tool project there is not required.
 
 When {meth}`~rmote.protocol.BaseProtocol.from_subprocess` is called, rmote creates
 the `rmote` package and injects `rmote.protocol` into the remote Python
@@ -265,7 +266,7 @@ output are discarded; use return values or logging to send information back.
 
 Tool source executes on the target, and messages contain pickled Python values.
 Use rmote only with trusted peers and code. The packet format does not provide
-authentication or encryption; use a trusted local process or an SSH transport.
+authentication or encryption; these come from the chosen {doc}`transport <transports>`.
 
 ## Concurrency Model
 
