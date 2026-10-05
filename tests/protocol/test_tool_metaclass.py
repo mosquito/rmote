@@ -18,9 +18,9 @@ class TestToolMetaclass:
     def test_tool_to_dict_shape(self) -> None:
         d = tool_to_dict(SimpleTool)
         assert d["name"] == "SimpleTool"
-        assert "source" in d
-        assert "def add" in d["source"]
-        assert "def echo" in d["source"]
+        assert "sources" in d
+        assert "def add" in d["sources"][d["module"]]["source"]
+        assert "def echo" in d["sources"][d["module"]]["source"]
 
     def test_tool_cannot_have_init(self) -> None:
         with pytest.raises(TypeError, match="__init__ cannot be defined"):
@@ -76,12 +76,12 @@ class TestToolMetaclass:
 
     def test_nested_intenum_in_source(self) -> None:
         d = tool_to_dict(ColorTool)
-        assert "IntEnum" in d["source"]
+        assert "IntEnum" in d["sources"][d["module"]]["source"]
 
     def test_nested_dataclass_roundtrip(self) -> None:
         d = tool_to_dict(GeometryTool)
-        assert "@dataclass" in d["source"]
-        assert "dataclass" in d["source"]
+        assert "@dataclass" in d["sources"][d["module"]]["source"]
+        assert "dataclass" in d["sources"][d["module"]]["source"]
 
         restored = tool_from_dict(d)
         pt = restored.Point(x=3, y=4)  # type: ignore[attr-defined]
@@ -89,7 +89,7 @@ class TestToolMetaclass:
 
     def test_inheritance_roundtrip(self) -> None:
         d = tool_to_dict(DerivedTool)
-        assert "BaseTool" in d["source"]
+        assert "BaseTool" in d["sources"][d["module"]]["source"]
 
         restored = tool_from_dict(d, {"BaseTool": BaseTool})
         assert restored().derived_method() == "derived"  # type: ignore[attr-defined]
@@ -97,7 +97,7 @@ class TestToolMetaclass:
     def test_module_level_enum(self) -> None:
         """Non-nested enum defined at module level is transferred with its class"""
         d = tool_to_dict(DirectionTool)
-        assert "Direction" in d["source"]
+        assert "Direction" in d["sources"][d["module"]]["source"]
 
         restored = tool_from_dict(d)
         assert restored().name_of(Direction.NORTH) == "NORTH"  # type: ignore[attr-defined]
@@ -107,7 +107,7 @@ class TestToolMetaclass:
     def test_module_level_custom_class(self) -> None:
         """Non-nested custom class defined at module level is transferred as a dependency"""
         d = tool_to_dict(BBoxTool)
-        assert "BoundingBox" in d["source"]
+        assert "BoundingBox" in d["sources"][d["module"]]["source"]
 
         restored = tool_from_dict(d)
         box = restored().make(0, 0, 10, 5)  # type: ignore[attr-defined]

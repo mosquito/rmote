@@ -29,8 +29,8 @@ def test_tool_serialization() -> None:
     tool_dict = tool_to_dict(SimpleTool)
 
     assert tool_dict["name"] == "SimpleTool"
-    assert "def add" in tool_dict["source"]
-    assert "def echo" in tool_dict["source"]
+    assert "def add" in tool_dict["sources"][tool_dict["module"]]["source"]
+    assert "def echo" in tool_dict["sources"][tool_dict["module"]]["source"]
 
 
 def test_tool_deserialization() -> None:

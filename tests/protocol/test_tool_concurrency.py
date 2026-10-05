@@ -87,6 +87,7 @@ async def test_module_load_executes_once_and_keeps_shared_state(client, monkeypa
     module_name = "rmote_test_concurrent_module"
     marker = tmp_path / "loads"
     source = (
+        "from rmote.protocol import Tool\n"
         f"with open({str(marker)!r}, 'a') as marker:\n    marker.write('load\\n')\n"
         "state = []\n"
         "class First(Tool):\n    shared = state\n"
@@ -106,8 +107,16 @@ async def test_module_load_executes_once_and_keeps_shared_state(client, monkeypa
         return await original_to_thread(function, *args)
 
     monkeypatch.setattr("rmote.protocol.asyncio.to_thread", build_in_thread)
-    first = {"name": "First", "module": module_name, "source": source}
-    second = {"name": "Second", "module": module_name, "source": source}
+    first = {
+        "name": "First",
+        "module": module_name,
+        "sources": {module_name: {"source": source, "file": "<probe>", "package": False}},
+    }
+    second = {
+        "name": "Second",
+        "module": module_name,
+        "sources": {module_name: {"source": source, "file": "<probe>", "package": False}},
+    }
     try:
         tasks = [asyncio.create_task(client._load_tool(first, 1))]
         await entered.wait()

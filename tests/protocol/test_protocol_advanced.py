@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 
 from rmote.protocol import Protocol, Tool
-from rmote.tools import FileSystem, Logger
+from rmote.tools.fs import FileSystem
+from rmote.tools.logger import Logger
 
 
 # Define tools at module level (not inside test functions) to avoid qualname issues

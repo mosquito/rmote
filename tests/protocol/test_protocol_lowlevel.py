@@ -15,7 +15,6 @@ from rmote.protocol import (
     RemoteLogHandler,
     Tool,
     bootstrap_packer,
-    process,
     tool_from_dict,
     tool_to_dict,
 )
@@ -79,7 +78,10 @@ class TestProtocolLowLevel:
             assert payload == pickle.dumps(packet)
         reader.feed_data(wire)
         reader.feed_eof()
-        assert await proto.receive() == (packet, Flags(flags), 42)
+        received = await proto.receive()
+        assert (received.payload, received.flags, received.packet_id) == (packet, Flags(flags), 42)
+        # The size is the serialized length before compression.
+        assert received.size == len(pickle.dumps(packet))
 
 
 class TestToolSerializationEdgeCases:
@@ -198,63 +200,6 @@ class TestRunFunction:
 
         assert inspect.iscoroutinefunction(run)
 
-    def test_process_is_sync_subprocess_helper(self) -> None:
-        import inspect
-
-        from rmote.protocol import process
-
-        assert not inspect.iscoroutinefunction(process)
-        result = process("echo", "hello", capture_output=True, text=True)
-        assert result.returncode == 0
-        assert "hello" in result.stdout
-
-
-# ---------------------------------------------------------------------------
-# process() unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestProcessFunction:
-    def test_basic_no_capture(self) -> None:
-        """capture_output=False (default) sets stdout/stderr to DEVNULL."""
-        result = process("true", capture_output=False)
-        assert result.returncode == 0
-
-    def test_capture_output(self) -> None:
-        result = process("echo", "hello", capture_output=True, text=True)
-        assert result.returncode == 0
-        assert "hello" in result.stdout
-
-    def test_stdin_bytes(self) -> None:
-        result = process("cat", stdin=b"hello", capture_output=True)
-        assert result.stdout == b"hello"
-
-    def test_stdin_str_is_encoded(self) -> None:
-        """str stdin is converted to bytes before passing to subprocess."""
-        result = process("cat", stdin="world", capture_output=True)
-        assert result.stdout == b"world"
-
-    def test_check_raises(self) -> None:
-        import subprocess
-
-        with pytest.raises(subprocess.CalledProcessError):
-            process("false", check=True)
-
-    def test_cwd(self, tmp_path) -> None:
-        result = process("pwd", capture_output=True, text=True, cwd=str(tmp_path))
-        assert str(tmp_path) in result.stdout
-
-    def test_env(self) -> None:
-        result = process(
-            "sh",
-            "-c",
-            "echo $RMOTE_TEST_VAR",
-            env={"RMOTE_TEST_VAR": "sentinel", "PATH": "/bin:/usr/bin"},
-            capture_output=True,
-            text=True,
-        )
-        assert "sentinel" in result.stdout
-
 
 # ---------------------------------------------------------------------------
 # Protocol unit tests (local, no subprocess)
@@ -332,12 +277,12 @@ class TestProtocolInternals:
         # drain pending tasks to avoid "task was destroyed but pending!" warnings
         await asyncio.sleep(0)
 
-    def test_tool_to_dict_getfile_exception(self) -> None:
-        """tool_to_dict falls back to __source__ when inspect.getfile raises."""
+    def test_tool_to_dict_missing_module(self) -> None:
+        """A class without an importable module uses the inline source path."""
         from unittest.mock import patch
 
         # _SourcelessTool is module-level so qualname doesn't contain "<locals>"
-        with patch("rmote.protocol.inspect.getfile", side_effect=OSError("no file")):
+        with patch("rmote.protocol.inspect.getmodule", return_value=None):
             d = tool_to_dict(_SourcelessTool)
         assert d["name"] == "_SourcelessTool"
         assert "source" in d

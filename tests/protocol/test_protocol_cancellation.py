@@ -13,14 +13,29 @@ from rmote.protocol import Flags, Protocol, Tool
 REQUEST = Flags.RPC | Flags.REQUEST
 
 
-@pytest_asyncio.fixture
-async def client():
+class Packets(Protocol):
+    """Protocol that compresses each packet, without the frame codec."""
+
+    FRAME_CODEC = False
+
+
+def build(policy: type[Protocol]) -> Protocol:
     writer = MagicMock(spec=asyncio.StreamWriter)
     writer.is_closing.return_value = False
     writer.close.side_effect = lambda: setattr(writer.is_closing, "return_value", True)
     writer.drain = AsyncMock()
     writer.wait_closed = AsyncMock()
-    return Protocol(asyncio.StreamReader(), writer)
+    return policy(asyncio.StreamReader(), writer)
+
+
+@pytest_asyncio.fixture
+async def client():
+    return build(Protocol)
+
+
+@pytest_asyncio.fixture
+async def packet_client():
+    return build(Packets)
 
 
 async def complete_call(client: Protocol, value: str = "ok") -> str:
@@ -61,7 +76,13 @@ async def test_cancel_waiting_for_write_lock(client):
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_compression_keeps_channel(client, monkeypatch):
+async def test_cancel_during_compression_keeps_channel(packet_client, monkeypatch):
+    """The packet policy compresses in a thread, where a cancel can interleave.
+
+    The frame codec compresses under the write lock instead, so it has no such
+    point: a cancelled sender either wrote its frame or wrote nothing.
+    """
+    client = packet_client
     entered = asyncio.Event()
 
     async def compress_in_thread(*args):
@@ -69,7 +90,9 @@ async def test_cancel_during_compression_keeps_channel(client, monkeypatch):
         await asyncio.Event().wait()
 
     monkeypatch.setattr("rmote.protocol.asyncio.to_thread", compress_in_thread)
-    task = asyncio.create_task(client._call("x" * 4096, REQUEST))
+    # Only a payload above COMPRESSION_INLINE compresses in a worker thread.
+    # A smaller one compresses on the loop, where no cancel can interleave.
+    task = asyncio.create_task(client._call("x" * (client.COMPRESSION_INLINE + 1), REQUEST))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -103,7 +103,11 @@ async def test_fallback_failure_closes_channel_and_finishes_pending(monkeypatch)
     monkeypatch.setattr(proto, "send", send)
     future = proto.loop.create_future()
     proto.futures[99] = future
-    proto._execute(42, Flags.RPC, lambda payload, packet_id: None, None, True)
+
+    async def handler(payload, packet_id):
+        return None
+
+    proto._execute(42, Flags.RPC, handler, None, True)
     tasks = list(proto._tasks)
     await asyncio.gather(*tasks)  # The wrapper must not have an unhandled error.
     await asyncio.sleep(0)
