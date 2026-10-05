@@ -75,6 +75,9 @@ disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
 addopts = ["--doctest-modules"]
+# No test of this suite needs thirty seconds. A test that waits longer waits
+# for something that will not happen, so it fails instead of holding the run.
+timeout = 30
 markers = ["docker: requires Docker containers"]
 testpaths = ["tests", "rmote", "docs", "README.md"]
 pythonpath = ["."]
