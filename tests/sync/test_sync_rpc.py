@@ -40,6 +40,62 @@ def test_remote_keyword_arguments():
         assert connection.call_with_timeout(3.0, Methods.keywords, timeout=8.0, tool="other") == (8.0, "other")
 
 
+def written(connection: Connection) -> list[int]:
+    """Collect the size of every frame this side writes from now on."""
+    assert connection._protocol is not None
+    sizes: list[int] = []
+    original = connection._protocol.writer.write
+
+    def counted(data: Any) -> None:
+        sizes.append(len(data))
+        original(data)
+
+    connection._protocol.writer.write = counted  # type: ignore[method-assign]
+    return sizes
+
+
+def test_a_call_can_refuse_compression():
+    """The frame of an uncompressed call carries the bytes as they are."""
+    payload = (b"rmote carries source and facts " * 2048).decode()
+    with Connection.from_local() as connection:
+        assert connection(Methods.echo, payload) == payload
+        sizes = written(connection)
+        assert connection(Methods.echo, payload) == payload
+        compressed = max(sizes)
+        sizes.clear()
+        assert connection.uncompressed(Methods.echo, payload) == payload
+        raw = max(sizes)
+
+    # The dictionary of the connection already holds this text, so the
+    # ordinary call costs a reference to it. The refusal costs every byte.
+    assert compressed * 50 < raw
+    assert raw > len(payload)
+
+
+def test_an_uncompressed_streaming_method_is_refused_before_the_call(tmp_path):
+    marker = tmp_path / "started"
+    with Connection.from_local() as connection:
+        with pytest.raises(TypeError, match="asynchronous Protocol"):
+            connection.uncompressed(Methods.stream, str(marker))
+        assert not marker.exists()
+        assert connection(Methods.echo, "still usable") == "still usable"
+        assert pending(connection) == 0
+
+
+@pytest.mark.parametrize("with_timeout", [False, True])
+def test_streaming_methods_rejected_before_remote_execution(tmp_path, with_timeout):
+    marker = tmp_path / "started"
+    with Connection.from_local() as connection:
+        with pytest.raises(TypeError, match="asynchronous Protocol"):
+            if with_timeout:
+                connection.call_with_timeout(5.0, Methods.stream, str(marker))
+            else:
+                connection(Methods.stream, str(marker))
+        assert not marker.exists()
+        assert connection(Methods.echo, "still usable") == "still usable"
+        assert pending(connection) == 0
+
+
 def test_remote_and_invalid_tool_errors():
     with Connection.from_local() as connection:
         with pytest.raises(FileNotFoundError, match="remote file"):

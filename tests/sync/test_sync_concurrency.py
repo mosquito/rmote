@@ -208,10 +208,15 @@ def test_logging_handler_reentry_fails_in_loop_thread_with_debug():
         assert remote(LogTool.emit) == "done"
         assert handled.wait(5)
         assert len(errors) == 3
-        assert all("event loop thread" in error for error in errors)
+        # Handlers run in the delivery thread, and the close waits for it, so a
+        # call from there must be refused instead of waiting for itself.
+        assert all("log delivery thread" in error for error in errors)
         assert remote._loop_thread is not None
-        assert threads == [remote._loop_thread.ident]
-        assert threads[0] != threading.get_ident()
+        assert remote._protocol is not None
+        worker = remote._protocol._logs.worker
+        assert worker is not None
+        assert threads == [worker.ident]
+        assert threads[0] not in (threading.get_ident(), remote._loop_thread.ident)
     finally:
         logger.removeHandler(handler)
         remote.close()

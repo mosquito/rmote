@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from rmote.sync import Connection
-from tests.support.ssh import local_sshd as local_sshd
+from tests.support.tool_cases.ping import Ping
 from tests.sync.tools import Environment
 
 
@@ -244,3 +244,15 @@ def test_keyboard_interrupt_during_handshake_recovers_process(tmp_path, monkeypa
         Connection.from_local(python=executable, close_timeout=0.1)
     assert processes[0].returncode is not None
     assert set(threading.enumerate()) == threads
+
+
+def test_a_call_that_reaches_the_loop_after_a_close_is_refused() -> None:
+    """The state is read without a lock, so the loop thread checks it again."""
+    with Connection.from_local(python=sys.executable) as connection:
+        assert connection(Ping.ping) == 1
+        connection._state = "CLOSING"
+        try:
+            with pytest.raises(RuntimeError, match="closing or closed"):
+                connection._runtime.run(lambda: connection._invoke(None, Ping.ping, (), {}))
+        finally:
+            connection._state = "OPEN"

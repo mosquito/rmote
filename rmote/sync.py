@@ -8,23 +8,17 @@ import math
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Coroutine, Mapping
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from types import TracebackType
-from typing import Any, ParamSpec, Self, TypeVar, overload
+from typing import Any, Never, ParamSpec, Self, TypeVar, overload
 
 from rmote._runtime import _Runtime
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, streaming_method
 
 __all__ = ["Connection"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-
-@dataclass
-class _Operation:
-    task: asyncio.Task[Any] | None = None
 
 
 def _check_timeout(value: float | None, name: str, *, optional: bool = True) -> None:
@@ -41,8 +35,18 @@ class Connection:
     Close the connection explicitly or use a context manager.
 
     Multiple caller threads can share the connection. Remote log records invoke
-    local logging handlers in the background loop thread. Those handlers must
-    not call synchronous methods of this connection.
+    local logging handlers in a delivery thread of their own, so a slow handler
+    does not hold up the calls. Those handlers must not call synchronous methods
+    of this connection, because closing waits for the queued records.
+
+    Throughput rises with the number of caller threads and then flattens,
+    because the Python work of a call is serialized by the interpreter lock:
+    about 28 us in the loop thread and 23 us in the caller. Measured on a local
+    transport with a tool that returns at once, sixteen threads reach 78 percent
+    of what one connection can do, thirty-two reach 88 percent and sixty-four
+    reach 96 percent; further threads add less than a percent each. Nothing
+    collapses beyond that point, so a wider pool only stops paying off. Open
+    another connection to go faster.
     """
 
     def __init__(self, *, _factory: bool = False) -> None:
@@ -69,15 +73,16 @@ class Connection:
         python: str = sys.executable,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
-        stderr: int = subprocess.DEVNULL,
+        stderr: int = subprocess.PIPE,
         connect_timeout: float | None = 30.0,
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
     ) -> Self:
         """Start a local Python interpreter and complete its protocol handshake.
 
-        Arguments go directly to subprocess exec, without a shell. If stderr
-        is PIPE, the connection reads and discards it until process exit.
+        Arguments go directly to subprocess exec, without a shell. The default
+        stderr is a pipe that the connection reads: its last lines explain a
+        failed start, and the rest is dropped.
         """
         return cls._connect(
             [python, "-qui"],
@@ -99,7 +104,7 @@ class Connection:
         identity: str | None = None,
         python: str = "python3",
         ssh_options: list[str] | None = None,
-        stderr: int = subprocess.DEVNULL,
+        stderr: int = subprocess.PIPE,
         connect_timeout: float | None = 30.0,
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
@@ -177,12 +182,22 @@ class Connection:
                 )
             )
             self._process = await asyncio.shield(self._spawn_task)
-            self._start_stderr_reader()
+            # The protocol reads the transport stderr itself, and it keeps the
+            # lines of the start for the failure of the handshake.
             self._protocol = await Protocol.from_subprocess(self._process)
             await self._protocol.__aenter__()
 
     def _start_stderr_reader(self) -> None:
-        if self._stderr_task is None and self._process is not None and self._process.stderr is not None:
+        """Drain the transport stderr while no protocol reads it.
+
+        A protocol reads that stream itself and keeps the lines of the start,
+        so a second reader would take them from it. This one covers the case
+        where the connection never reached a protocol: the pipe still has to
+        be emptied, or the process blocks on its own write.
+        """
+        if self._protocol is not None or self._stderr_task is not None:
+            return
+        if self._process is not None and self._process.stderr is not None:
             self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
 
     @staticmethod
@@ -241,20 +256,40 @@ class Connection:
     def _check_caller(self) -> None:
         if threading.current_thread() is self._loop_thread:
             raise RuntimeError("Cannot use a synchronous connection from its event loop thread")
+        # A log handler runs in the delivery thread, which the close waits for.
+        # A call from there would wait for itself.
+        protocol = self._protocol
+        if protocol is not None and threading.current_thread() is protocol._logs.worker:
+            raise RuntimeError("Cannot use a synchronous connection from its log delivery thread")
+
+    @overload
+    def __call__(self, tool: Callable[P, AsyncIterator[Any]], /, *args: P.args, **kwargs: P.kwargs) -> Never: ...
 
     @overload
     def __call__(self, tool: Callable[P, Coroutine[Any, Any, R]], /, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
     @overload
-    def __call__(self, tool: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R: ...
+    def __call__(self, tool: Callable[P, R | Coroutine[Any, Any, R]], /, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
     def __call__(self, tool: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         """Call a Tool method using the connection's default RPC deadline.
 
         Both synchronous and asynchronous Tool methods return their result.
         Every keyword argument belongs to the remote method.
+        Async generator methods require the asynchronous Protocol client and
+        raise TypeError here before any remote call.
         """
         return self.call_with_timeout(self._rpc_timeout, tool, *args, **kwargs)
+
+    @overload
+    def call_with_timeout(
+        self,
+        timeout: float | None,
+        tool: Callable[P, AsyncIterator[Any]],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Never: ...
 
     @overload
     def call_with_timeout(
@@ -270,7 +305,7 @@ class Connection:
     def call_with_timeout(
         self,
         timeout: float | None,
-        tool: Callable[P, R],
+        tool: Callable[P, R | Coroutine[Any, Any, R]],
         /,
         *args: P.args,
         **kwargs: P.kwargs,
@@ -292,20 +327,60 @@ class Connection:
         After a detected transport failure, new calls raise ConnectionError
         with the original error as their cause. Calls already waiting for a
         response propagate the original transport error.
+        Async generator methods raise TypeError; use Protocol for streaming.
         """
+        return self._dispatch(timeout, tool, args, kwargs, True)
+
+    @overload
+    def uncompressed(self, tool: Callable[P, AsyncIterator[Any]], /, *args: P.args, **kwargs: P.kwargs) -> Never: ...
+
+    @overload
+    def uncompressed(self, tool: Callable[P, Coroutine[Any, Any, R]], /, *args: P.args, **kwargs: P.kwargs) -> R: ...
+
+    @overload
+    def uncompressed(
+        self, tool: Callable[P, R | Coroutine[Any, Any, R]], /, *args: P.args, **kwargs: P.kwargs
+    ) -> R: ...
+
+    def uncompressed(self, tool: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Call without compressing the request or the response.
+
+        Use it for data that cannot shrink, such as an archive or an image:
+        the bytes then skip the dictionary of the connection instead of paying
+        a deflate pass that gains nothing.
+
+        The deadline is the connection's default. All arguments belong to the
+        tool, including a keyword named compressed, and a neighbouring call
+        keeps its own policy. Async generator methods raise TypeError, as they
+        do for an ordinary call.
+        """
+        return self._dispatch(self._rpc_timeout, tool, args, kwargs, False)
+
+    def _dispatch(
+        self,
+        timeout: float | None,
+        tool: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        compressed: bool,
+    ) -> Any:
+        """Check the caller and the state, then run one call on the loop."""
         self._check_caller()
         _check_timeout(timeout, "timeout")
-        operation = _Operation()
-        with self._state_lock:
-            if self._state != "OPEN":
-                raise RuntimeError("Connection is closing or closed")
-            future = self._runtime.submit(lambda: self._invoke(operation, timeout, tool, args, kwargs))
+        if streaming_method(tool):
+            raise TypeError("Streaming Tool methods require the asynchronous Protocol client")
+        # The state is read without the lock, and the loop thread checks it
+        # again before the call leaves. A closing connection is therefore
+        # refused, and an open one does not pay for a second lock per call.
+        if self._state != "OPEN":
+            raise RuntimeError("Connection is closing or closed")
+        future = self._runtime.submit(lambda: self._invoke(timeout, tool, args, kwargs, compressed))
         try:
             return future.result()
         except KeyboardInterrupt:
             future.cancel()
             try:
-                self._runtime.run(lambda: self._wait_operation(operation))
+                self._runtime.wait(future)
             except RuntimeError:
                 # A concurrent close owns finalization after runtime shutdown starts.
                 pass
@@ -313,23 +388,27 @@ class Connection:
 
     async def _invoke(
         self,
-        operation: _Operation,
         timeout: float | None,
         tool: Callable[..., Any],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        compressed: bool = True,
     ) -> Any:
-        operation.task = asyncio.current_task()
+        if self._state != "OPEN":
+            raise RuntimeError("Connection is closing or closed")
         assert self._protocol is not None
         if self._protocol._closed.is_set():
             raise ConnectionError("Connection transport is closed") from self._protocol._close_error
-        async with asyncio.timeout(timeout):
-            return await self._protocol._call_tool(tool, *args, **kwargs)
-
-    @staticmethod
-    async def _wait_operation(operation: _Operation) -> None:
-        if operation.task is not None:
-            await asyncio.gather(operation.task, return_exceptions=True)
+        # Every call runs as its own task, so the policy of this one stays in
+        # its own context and no neighbour sees it.
+        token = self._protocol._compression.set(compressed)
+        try:
+            if timeout is None:
+                return await self._protocol._call_tool(tool, *args, **kwargs)
+            async with asyncio.timeout(timeout):
+                return await self._protocol._call_tool(tool, *args, **kwargs)
+        finally:
+            self._protocol._compression.reset(token)
 
     def close(self) -> None:
         """Close the protocol, reap the process, and join the runtime thread.

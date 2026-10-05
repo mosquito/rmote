@@ -134,8 +134,36 @@
     def check(remote: Connection) -> None:
         # Unused ignores fail if the API stops detecting an expected error.
         remote(Methods.add, "wrong", 2)  # type: ignore[call-overload]
+
+    def check_missing(remote: Connection) -> None:
         remote(Methods.add, 1)  # type: ignore[call-overload]
+
+    def check_unknown(remote: Connection) -> None:
         remote(Methods.add, 1, 2, unexpected=3)  # type: ignore[call-arg, arg-type]
+
+    def check_async(remote: Connection) -> None:
         remote.call_with_timeout(1.0, Methods.async_add, "wrong", 2)  # type: ignore[call-overload]
-        wrong: str = remote(Methods.add, 1, 2)  # type: ignore[assignment]
-        wrong_async: str = remote.call_with_timeout(None, Methods.async_add, 1, 2)  # type: ignore[assignment]
+
+    def check_results(remote: Connection) -> None:
+        result = remote(Methods.add, 1, 2)
+        wrong: str = result  # type: ignore[assignment]
+        async_result = remote.call_with_timeout(None, Methods.async_add, 1, 2)
+        wrong_async: str = async_result  # type: ignore[assignment]
+
+- case: sync_streaming_methods_do_not_promise_a_result
+  main: |
+    from collections.abc import AsyncIterator
+    from typing import Never, assert_type
+    from rmote.protocol import Tool
+    from rmote.sync import Connection
+
+    class Methods(Tool):
+        @staticmethod
+        async def items(count: int) -> AsyncIterator[int]:
+            yield count
+
+    def check_call(remote: Connection) -> None:
+        assert_type(remote(Methods.items, 1), Never)
+
+    def check_timeout(remote: Connection) -> None:
+        assert_type(remote.call_with_timeout(None, Methods.items, 1), Never)

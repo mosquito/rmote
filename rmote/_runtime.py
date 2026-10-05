@@ -134,6 +134,20 @@ class _Runtime:
         if task is not None:
             task.cancel()
 
+    async def _await_task(self, future: Future[Any]) -> None:
+        """Wait for the work behind *future*, however it ends."""
+        task = self._tasks.get(future)
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    def wait(self, future: Future[Any], *, timeout: float | None = None) -> None:
+        """Block until the loop has finished the work behind *future*.
+
+        A caller that stopped waiting still owns the operation it started, so
+        it uses this to let the loop finish before it gives up the connection.
+        """
+        self.run(lambda: self._await_task(future), timeout=timeout)
+
     def _request_done(self, future: Future[Any]) -> None:
         with self._lock:
             self._requests.discard(future)
