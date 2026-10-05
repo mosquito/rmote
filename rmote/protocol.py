@@ -1362,6 +1362,11 @@ class BaseProtocol:
                         self.inflate = FrameDecompressor(self.FRAGMENT_SIZE)
                     return
                 if not line:
+                    if self._stderr_task is not None:
+                        # Pipe callbacks can report stdout EOF before stderr
+                        # has been drained. A child may keep stderr open, so
+                        # collecting the last diagnostics must be bounded.
+                        await asyncio.wait({self._stderr_task}, timeout=0.1)
                     raise ConnectionError(self.start_failure(said, self.transport_said))
                 spoken = line.decode("utf-8", "replace").strip()
                 if spoken:
@@ -1656,7 +1661,18 @@ class Protocol(BaseProtocol):
 
     async def __aenter__(self) -> Self:
         try:
-            await self.write_boundary()
+            try:
+                await self.write_boundary()
+            except OSError as error:
+                # A failed transport can close stdin before we send READY.
+                # Its output still explains the failure, but inherited open
+                # pipes must not keep this error path waiting indefinitely.
+                try:
+                    async with asyncio.timeout(1):
+                        await self.read_boundary()
+                except TimeoutError:
+                    pass
+                raise ConnectionError(self.start_failure((), self.transport_said)) from error
             await self.read_boundary()
         except BaseException:
             # A failed __aenter__ is not followed by __aexit__ by Python.

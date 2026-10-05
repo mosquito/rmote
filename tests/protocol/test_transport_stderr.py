@@ -37,6 +37,45 @@ async def test_a_transport_that_speaks_on_stderr_explains_the_failure():
 
 
 @pytest.mark.asyncio
+async def test_transport_exits_before_the_ready_write():
+    remote = await Protocol.from_command("sh", "-c", "echo bootstrap-failed; echo transport-failed >&2; exit 3")
+    process = remote._owned_process
+    assert process is not None
+    await process.wait()
+    with pytest.raises(ConnectionError) as failure:
+        async with remote:
+            pass
+    assert "It said: bootstrap-failed" in str(failure.value)
+    assert "Its transport said: transport-failed" in str(failure.value)
+    assert remote._owned_process is None
+    assert remote._stderr_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_stdout", [False, True])
+async def test_failed_ready_write_does_not_wait_for_open_output_pipes(close_stdout):
+    script = "import os, time; os.close(0); "
+    if close_stdout:
+        script += "os.close(1); "
+    script += "os.write(2, b'transport-failed\\n'); time.sleep(60)"
+    remote = await Protocol.from_command(sys.executable, "-c", script)
+    process = remote._owned_process
+    assert process is not None
+    try:
+        async with asyncio.timeout(5):
+            while not remote.transport_said:
+                await asyncio.sleep(0.001)
+        with pytest.raises(ConnectionError, match="Its transport said: transport-failed"):
+            async with asyncio.timeout(3), remote:
+                pass
+        assert remote._owned_process is None
+        assert process.returncode is not None
+    finally:
+        if remote._owned_process is not None:
+            await remote.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
 async def test_an_interpreter_that_cannot_start_explains_itself():
     """A missing module of the standard library is a fatal error on stderr."""
     protocol = await Protocol.from_command(python=sys.executable, env={"PYTHONHOME": "/nonexistent-home"})
