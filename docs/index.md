@@ -26,6 +26,7 @@ the connector.
 | Task | Guide |
 |---|---|
 | Write a remote operation and return Python data | {doc}`writing-tools` |
+| Explore a host from a Python console | {doc}`repl` |
 | Collect and cache host state | {doc}`api/tools/facts` |
 | Apply an operation to several hosts | {doc}`multi-host` |
 | Synchronize file contents in either direction | {doc}`api/tools/file_sync` |
@@ -47,6 +48,7 @@ client unpickles returned data.
 
 quickstart
 writing-tools
+repl
 shell
 sshmux
 multi-host

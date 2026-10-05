@@ -3,7 +3,7 @@
 import argparse
 from collections.abc import Callable
 
-from rmote.cli import shell, sshmux
+from rmote.cli import repl, shell, sshmux
 
 
 class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -16,6 +16,7 @@ def build_parser(prog: str = "rmote") -> argparse.ArgumentParser:
         prog=prog, description="Run shells and tools over an rmote connection.", formatter_class=HelpFormatter
     )
     subparsers = parser.add_subparsers(required=True, title="commands")
+    repl.configure_parser(subparsers.add_parser("repl", help="Open a Python REPL with a connected remote."))
     shell.configure_parser(subparsers.add_parser("shell", help="Open an interactive terminal shell."))
     sshmux.configure_parser(subparsers.add_parser("sshmux", help="Serve OpenSSH sessions over one connection."))
     for command in subparsers.choices.values():

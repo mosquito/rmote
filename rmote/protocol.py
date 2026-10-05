@@ -1388,6 +1388,7 @@ class BaseProtocol:
         python: str = "python3",
         stderr: int = asyncio.subprocess.PIPE,
         env: dict[str, str] | None = None,
+        start_new_session: bool = False,
     ) -> Self:
         """Bootstrap a Protocol over any command that starts a remote Python REPL.
 
@@ -1404,6 +1405,7 @@ class BaseProtocol:
                 start, and the rest is dropped. Pass DEVNULL to discard
                 it, or a descriptor to let the caller see it live.
             env: Environment for the transport command. None inherits it.
+            start_new_session: Isolate the transport from local terminal signals.
 
         Returns:
             A connected instance. The caller must still enter its context.
@@ -1416,6 +1418,7 @@ class BaseProtocol:
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr,
             env=env,
+            start_new_session=start_new_session,
         )
         instance = await cls.from_subprocess(proc)
         instance._owned_process = proc  # type: ignore[attr-defined]

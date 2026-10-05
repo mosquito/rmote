@@ -51,7 +51,7 @@ class Connection:
 
     def __init__(self, *, _factory: bool = False) -> None:
         if not _factory:
-            raise TypeError("Use Connection.from_local() or Connection.from_ssh()")
+            raise TypeError("Use Connection.from_local(), Connection.from_command() or Connection.from_ssh()")
         self._runtime = _Runtime()
         self._process: asyncio.subprocess.Process | None = None
         self._protocol: Protocol | None = None
@@ -65,6 +65,42 @@ class Connection:
         self._entered = False
         self._rpc_timeout: float | None = None
         self._close_timeout = 5.0
+
+    @classmethod
+    def from_command(
+        cls,
+        *argv: str,
+        python: str = "python3",
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        stderr: int = subprocess.PIPE,
+        start_new_session: bool = False,
+        connect_timeout: float | None = 30.0,
+        rpc_timeout: float | None = None,
+        close_timeout: float = 5.0,
+    ) -> Self:
+        """Connect through a command that passes stdin and stdout unchanged.
+
+        Append ``python -qui`` to *argv*, without a shell. For example,
+        ``from_command("docker", "exec", "-i", "app")`` starts
+        ``docker exec -i app python3 -qui``. Do not request a transport TTY.
+        Empty *argv* starts the specified interpreter locally.
+
+        ``cwd`` and ``env`` configure the local transport process. Stderr and
+        deadlines behave as in :meth:`from_local` and :meth:`from_ssh`.
+        ``start_new_session`` isolates the transport from terminal signals,
+        useful when the caller handles Ctrl-C itself.
+        """
+        return cls._connect(
+            [*argv, python, "-qui"],
+            cwd=cwd,
+            env=env,
+            stderr=stderr,
+            connect_timeout=connect_timeout,
+            rpc_timeout=rpc_timeout,
+            close_timeout=close_timeout,
+            start_new_session=start_new_session,
+        )
 
     @classmethod
     def from_local(
@@ -84,8 +120,8 @@ class Connection:
         stderr is a pipe that the connection reads: its last lines explain a
         failed start, and the rest is dropped.
         """
-        return cls._connect(
-            [python, "-qui"],
+        return cls.from_command(
+            python=python,
             cwd=cwd,
             env=env,
             stderr=stderr,
@@ -119,11 +155,10 @@ class Connection:
             cmd += ["-i", identity]
         if ssh_options:
             cmd += ssh_options
-        cmd += [host, python, "-qui"]
-        return cls._connect(
-            cmd,
-            cwd=None,
-            env=None,
+        cmd.append(host)
+        return cls.from_command(
+            *cmd,
+            python=python,
             stderr=stderr,
             connect_timeout=connect_timeout,
             rpc_timeout=rpc_timeout,
@@ -141,6 +176,7 @@ class Connection:
         connect_timeout: float | None,
         rpc_timeout: float | None,
         close_timeout: float,
+        start_new_session: bool = False,
     ) -> Self:
         _check_timeout(connect_timeout, "connect_timeout")
         _check_timeout(rpc_timeout, "rpc_timeout")
@@ -149,7 +185,9 @@ class Connection:
         connection._rpc_timeout = rpc_timeout
         connection._close_timeout = close_timeout
         try:
-            connection._runtime.run(lambda: connection._open(cmd, cwd, env, stderr, connect_timeout))
+            connection._runtime.run(
+                lambda: connection._open(cmd, cwd, env, stderr, connect_timeout, start_new_session)
+            )
         except BaseException:
             try:
                 connection.close()
@@ -166,6 +204,7 @@ class Connection:
         env: Mapping[str, str] | None,
         stderr: int,
         timeout: float | None,
+        start_new_session: bool = False,
     ) -> None:
         self._loop_thread = threading.current_thread()
         async with asyncio.timeout(timeout):
@@ -179,6 +218,7 @@ class Connection:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr,
+                    start_new_session=start_new_session,
                 )
             )
             self._process = await asyncio.shield(self._spawn_task)

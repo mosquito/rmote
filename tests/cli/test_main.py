@@ -40,7 +40,9 @@ class TestParser:
         assert args.socket == "/tmp/mux"
         assert args.transport == ["ssh", "-p", "2222", "user@host"]
 
-    @pytest.mark.parametrize("command", [["shell"], ["sshmux", "--socket=/tmp/mux"]], ids=["shell", "mux"])
+    @pytest.mark.parametrize(
+        "command", [["shell"], ["sshmux", "--socket=/tmp/mux"], ["repl"]], ids=["shell", "mux", "repl"]
+    )
     @pytest.mark.parametrize("separator", [[], ["--"]], ids=["implicit", "explicit"])
     def test_transport_help_belongs_to_transport(self, command: list[str], separator: list[str]) -> None:
         transport = ["transport", "--help", "--python", "other-python"]
@@ -81,8 +83,8 @@ def test_shell_dispatch_preserves_bytes_transport_and_exit_status(cli: list[str]
 
 @pytest.mark.parametrize(
     "command, option",
-    [([], b"shell"), (["shell"], b"--no-pty"), (["sshmux"], b"--socket")],
-    ids=["root", "shell", "mux"],
+    [([], b"shell"), (["shell"], b"--no-pty"), (["sshmux"], b"--socket"), (["repl"], b"--async")],
+    ids=["root", "shell", "mux", "repl"],
 )
 def test_help(cli: list[str], command: list[str], option: bytes) -> None:
     result = subprocess.run([*cli, *command, "--help"], capture_output=True, timeout=10)

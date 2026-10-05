@@ -71,6 +71,22 @@ programs and window resizing all work. A redirected input or output uses pipes
 instead and keeps the bytes exactly. Press `~.` after a line end to close the
 session.
 
+## Python REPL
+
+Open a Python console with a ready connection and remote host facts:
+
+```bash
+rmote repl -- ssh -T server
+rmote repl -- docker exec -i my-container
+rmote repl --async -- ssh -T server
+```
+
+Use `host["system"]` to inspect the host, or
+`remote(facts.gather, sections=["cpu", "memory"])` to collect more facts.
+With `--async`, write `await remote(...)`. Built-in tools are imported and
+you can define your own `Tool` in the console. See the
+[REPL guide](https://docs.rmote.org/repl.html) for examples and script mode.
+
 ## Guides
 
 - [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
