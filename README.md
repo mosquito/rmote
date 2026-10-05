@@ -13,8 +13,7 @@ Calls return Python values and propagate remote exceptions to the caller.
 
 Install rmote on your local machine. The target needs Python 3.11 or newer,
 but no rmote installation or agent. Tool code is sent when it is first used
-on a connection. Both machines must run a supported POSIX system; Windows
-remote hosts are not supported.
+on a connection.
 
 ## Install
 
@@ -51,12 +50,30 @@ through deploying Redis to a Docker container: install its package, render a
 systemd unit, start the service, and verify it. Switching to SSH changes only
 the connector.
 
+## Interactive Shell
+
+`rmote-shell` opens an interactive shell on a host. The transport is any command
+that passes stdin and stdout through unchanged, so the same client reaches hosts
+over SSH, containers and pods.
+
+```bash
+rmote-shell ssh server
+rmote-shell docker exec -i my-container
+rmote-shell kubectl exec -i pod/my-pod --
+```
+
+The remote side opens a real pseudo terminal, so job control, full screen
+programs and window resizing all work. A redirected input or output uses pipes
+instead and keeps the bytes exactly. Press `~.` after a line end to close the
+session.
+
 ## Guides
 
 - [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
+- [Interactive shell](https://docs.rmote.org/shell.html): run a shell on a host through any transport command.
 - [Multiple hosts](https://docs.rmote.org/multi-host.html): run operations concurrently and handle individual failures.
 - [Templates](https://docs.rmote.org/templating.html): render configuration files.
-- [Built-in tools](https://docs.rmote.org/api/tools/index.html): files, commands, packages, services, users, and logging.
+- [Built-in tools](https://docs.rmote.org/api/tools/index.html): files, commands, packages, services, users, host facts, and logging.
 - [Connection reference](https://docs.rmote.org/api/sync.html): SSH options, deadlines, and cleanup.
 - [Execution model](https://docs.rmote.org/concepts.html): code transfer, state, concurrency, and cancellation.
 
@@ -76,6 +93,26 @@ make docs-test
 Some integration tests require Docker; SSH tests need local OpenSSH binaries.
 Use `uv run pytest --no-docker` to exclude Docker tests. Named documentation
 examples run through `markdown-pytest` alongside the Python tests.
+
+Tests are grouped by module: `tests/protocol`, `tests/sync`, `tests/tools`,
+`tests/facts` (including `tests/facts/collectors`), `tests/cache`,
+`tests/immutable`, `tests/process`, and `tests/templates`. Fixtures are scoped
+through local `conftest.py` files; shared implementations live in `tests/support`.
+
+Run `uv run pytest tests/cache` to check the general cache, its JSON and SQLite
+backends, and serialization. `uv run pytest tests/facts` checks collection,
+result validation, and integration with the cache. For a local run of both
+areas, use `uv run pytest tests/cache tests/facts --no-docker`.
+
+Collector integration tests use disposable Debian/systemd and Arch Docker
+containers, without an external SSH host. The systemd fixture uses Debian
+Forky for JSON-capable `resolvectl status`; package tests also cover Debian
+Trixie and Arch. The networkd/iproute2 tests also run on Ubuntu Noble,
+including managed DNS/NTP settings and cache refresh after networkd stops.
+Run `uv run pytest tests/facts -m docker` for those integration checks, or
+`uv run pytest tests/facts --no-docker` for local collection and parser tests.
+The systemd container needs privileged Docker with private network/cgroup namespaces;
+timesyncd stays masked so tests cannot change the host clock.
 
 rmote is beta software. See the [release notes](https://docs.rmote.org/release-notes.html)
 for changes and compatibility. Licensed under [Apache 2.0](LICENSE).
