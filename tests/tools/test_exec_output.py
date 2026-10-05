@@ -21,7 +21,7 @@ async def execute(request: pytest.FixtureRequest) -> AsyncIterator[Callable[...,
     if request.param == "direct":
 
         async def direct(method, *args, **kwargs):
-            return method(*args, **kwargs)
+            return await method(*args, **kwargs)
 
         yield direct
         return

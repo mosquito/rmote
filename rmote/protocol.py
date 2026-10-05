@@ -12,7 +12,6 @@ import io
 import logging
 import os
 import pickle
-import subprocess
 import struct
 import sys
 import textwrap
@@ -44,53 +43,6 @@ from typing import Any, ClassVar, NotRequired, ParamSpec, Self, TypeAlias, Typed
 
 
 
-def process(
-    *cmd_and_args: str,
-    stdin: None | bytes | str = None,
-    capture_output: bool = False,
-    text: bool = False,
-    env: dict[str, str] | None = None,
-    shell: bool = False,
-    check: bool = False,
-    cwd: None | str | Path = None,
-) -> subprocess.CompletedProcess[Any]:
-    """
-    function for execute a subprocess on the remote side,
-    must be safe, do not share stdout/stderr of the child process,
-    because it's protocol pipes.
-
-    Tools must be use only this function for execute subprocesses,
-    to avoid conflicts with protocol communication.
-
-    String stdin is encoded in binary mode. Text mode requires string stdin.
-    """
-    logging.debug("Executing subprocess: %r", cmd_and_args)
-
-    kwargs: dict[str, Any] = {
-        "stdin": subprocess.DEVNULL,
-        "capture_output": capture_output,
-        "text": text,
-        "env": env,
-        "shell": shell,
-        "check": check,
-        "cwd": cwd,
-    }
-
-    if stdin is not None:
-        if text and isinstance(stdin, bytes):
-            raise TypeError("stdin must be str when text=True")
-        if isinstance(stdin, str) and not text:
-            stdin = stdin.encode()
-        # Use input= (not stdin=) so subprocess uses PIPE internally;
-        # remove stdin=DEVNULL to avoid the "stdin and input may not both be used" error.
-        del kwargs["stdin"]
-        kwargs["input"] = stdin
-
-    if not capture_output:
-        kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
-
-    return subprocess.run(cmd_and_args, **kwargs)
 
 
 class RPCRequest(TypedDict):

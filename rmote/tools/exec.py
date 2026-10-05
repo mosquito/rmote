@@ -1,7 +1,8 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 
-from rmote.protocol import Tool, process
+from rmote.process import async_process
+from rmote.protocol import Tool
 
 
 class Exec(Tool):
@@ -9,18 +10,19 @@ class Exec(Tool):
 
     Capture binary output and inspect nonzero exit codes without a shell::
 
+        >>> import asyncio
         >>> import sys
-        >>> result = Exec.command(sys.executable, "-c", "print('hello')", capture_output=True)
+        >>> result = asyncio.run(Exec.command(sys.executable, "-c", "print('hello')", capture_output=True))
         >>> result.returncode, result.stdout
         (0, b'hello\\n')
-        >>> Exec.command(sys.executable, "-c", "raise SystemExit(3)", check=False).returncode
+        >>> asyncio.run(Exec.command(sys.executable, "-c", "raise SystemExit(3)", check=False)).returncode
         3
-        >>> Exec.shell("printf '%s' hello", capture_output=True).stdout
+        >>> asyncio.run(Exec.shell("printf '%s' hello", capture_output=True)).stdout
         b'hello'
     """
 
     @staticmethod
-    def command(
+    async def command(
         *args: str,
         check: bool = True,
         env: dict[str, str] | None = None,
@@ -45,10 +47,10 @@ class Exec(Tool):
             ``stdout``, and ``stderr``. Output fields contain bytes when captured,
             or None when capture_output is False.
         """
-        return process(*args, capture_output=capture_output, check=check, env=env, cwd=cwd, stdin=stdin)
+        return await async_process(*args, capture_output=capture_output, check=check, env=env, cwd=cwd, stdin=stdin)
 
     @staticmethod
-    def shell(
+    async def shell(
         expression: str,
         check: bool = True,
         env: dict[str, str] | None = None,
@@ -73,6 +75,6 @@ class Exec(Tool):
             ``stdout``, and ``stderr``. Output fields contain bytes when captured,
             or None when capture_output is False.
         """
-        return process(
+        return await async_process(
             expression, capture_output=capture_output, check=check, env=env, cwd=cwd, stdin=stdin, shell=True
         )

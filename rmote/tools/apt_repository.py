@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rmote.protocol import Tool
+from rmote.requires import needs_file
 
 _SOURCES_DIR = Path("/etc/apt/sources.list.d")
 _KEYRINGS_DIR = Path("/etc/apt/keyrings")
@@ -20,6 +21,10 @@ class AptRepository(Tool):
     Repository sources are written as DEB822 ``.sources`` files under
     ``/etc/apt/sources.list.d/``. GPG keyrings are stored in
     ``/etc/apt/keyrings/``. All operations are idempotent and require root.
+
+    Every operation needs the ``/etc/apt`` configuration of Debian and Ubuntu.
+    A target without it refuses with NotImplementedError instead of writing a
+    directory that nothing reads.
 
 
     Write and remove a real source definition inside a disposable Debian container.
@@ -54,6 +59,7 @@ class AptRepository(Tool):
         Returns:
             :class:`Result` indicating whether the key was written.
         """
+        needs_file("AptRepository.key", _SOURCES_DIR.parent, "Debian and Ubuntu")
         _KEYRINGS_DIR.mkdir(parents=True, exist_ok=True)
         path = _KEYRINGS_DIR / name
         if path.exists() and path.read_bytes() == data:
@@ -98,6 +104,7 @@ class AptRepository(Tool):
             lines.append(f"Signed-By: {signed_by}")
         content = "\n".join(lines) + "\n"
 
+        needs_file("AptRepository.present", _SOURCES_DIR.parent, "Debian and Ubuntu")
         _SOURCES_DIR.mkdir(parents=True, exist_ok=True)
         path = _SOURCES_DIR / f"{name}.sources"
         if path.exists() and path.read_text() == content:
@@ -115,6 +122,7 @@ class AptRepository(Tool):
         Returns:
             :class:`Result` indicating whether the file was removed.
         """
+        needs_file("AptRepository.absent", _SOURCES_DIR.parent, "Debian and Ubuntu")
         p = _SOURCES_DIR / f"{name}.sources"
         if p.exists():
             p.unlink()

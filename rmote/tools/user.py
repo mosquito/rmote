@@ -3,7 +3,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from rmote.protocol import Tool, process
+from rmote.process import async_process
+from rmote.protocol import Tool
+from rmote.requires import needs_program
 
 
 @dataclass
@@ -25,33 +27,38 @@ class GroupResult:
 
 class Backend:
     @staticmethod
-    def useradd(*args: str) -> tuple[int, str, str]:
+    async def useradd(*args: str) -> tuple[int, str, str]:
+        needs_program("User", "useradd", "the shadow utilities")
         logging.debug("calling useradd with args: %s", args)
-        result = process("useradd", *args, capture_output=True, text=True)
+        result = await async_process("useradd", *args, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
-    def usermod(*args: str) -> tuple[int, str, str]:
+    async def usermod(*args: str) -> tuple[int, str, str]:
+        needs_program("User", "usermod", "the shadow utilities")
         logging.debug("calling usermod with args: %s", args)
-        result = process("usermod", *args, capture_output=True, text=True)
+        result = await async_process("usermod", *args, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
-    def userdel(*args: str) -> tuple[int, str, str]:
+    async def userdel(*args: str) -> tuple[int, str, str]:
+        needs_program("User", "userdel", "the shadow utilities")
         logging.debug("calling userdel with args: %s", args)
-        result = process("userdel", *args, capture_output=True, text=True)
+        result = await async_process("userdel", *args, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
-    def groupadd(*args: str) -> tuple[int, str, str]:
+    async def groupadd(*args: str) -> tuple[int, str, str]:
+        needs_program("User", "groupadd", "the shadow utilities")
         logging.debug("calling groupadd with args: %s", args)
-        result = process("groupadd", *args, capture_output=True, text=True)
+        result = await async_process("groupadd", *args, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
-    def groupdel(*args: str) -> tuple[int, str, str]:
+    async def groupdel(*args: str) -> tuple[int, str, str]:
+        needs_program("User", "groupdel", "the shadow utilities")
         logging.debug("calling groupdel with args: %s", args)
-        result = process("groupdel", *args, capture_output=True, text=True)
+        result = await async_process("groupdel", *args, capture_output=True, text=True)
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
@@ -93,6 +100,11 @@ class Backend:
 class User(Tool):
     """Manage users, groups, SSH keys, and sudoers on the remote host. Requires root.
 
+    Creating or removing a user or a group runs the shadow utilities
+    (``useradd`` and its family), and a target without them refuses with
+    NotImplementedError. ``sudoer`` and ``authorized_key`` only write
+    files, so they work on any POSIX target.
+
     Create a group and user in a disposable Debian container, then remove them::
 
         >>> remote = getfixture("debian_tool")
@@ -114,7 +126,7 @@ class User(Tool):
     """
 
     @staticmethod
-    def present(
+    async def present(
         name: str,
         *,
         uid: int | None = None,
@@ -166,7 +178,7 @@ class User(Tool):
                 args.append("--no-create-home")
             args.append(name)
 
-            rc, _, err = Backend.useradd(*args)
+            rc, _, err = await Backend.useradd(*args)
             if rc != 0:
                 raise RuntimeError(f"useradd {name!r} failed:\n{err}")
 
@@ -199,7 +211,7 @@ class User(Tool):
 
         if mod_args:
             mod_args.append(name)
-            rc, _, err = Backend.usermod(*mod_args)
+            rc, _, err = await Backend.usermod(*mod_args)
             if rc != 0:
                 raise RuntimeError(f"usermod {name!r} failed:\n{err}")
             info = Backend.lookup(name)
@@ -210,7 +222,7 @@ class User(Tool):
         return Result(name=name, uid=uid_out, gid=gid_out, home=home_out, shell=shell_out, changed=False)
 
     @staticmethod
-    def absent(name: str, *, remove_home: bool = False) -> bool:
+    async def absent(name: str, *, remove_home: bool = False) -> bool:
         """
         Ensure a user does not exist. Returns True if user was removed.
 
@@ -222,13 +234,13 @@ class User(Tool):
             return False
         args = ["--remove"] if remove_home else []
         args.append(name)
-        rc, _, err = Backend.userdel(*args)
+        rc, _, err = await Backend.userdel(*args)
         if rc != 0:
             raise RuntimeError(f"userdel {name!r} failed:\n{err}")
         return True
 
     @staticmethod
-    def group_present(name: str, *, gid: int | None = None, system: bool = False) -> GroupResult:
+    async def group_present(name: str, *, gid: int | None = None, system: bool = False) -> GroupResult:
         """Ensure a group exists. Idempotent."""
         existing_gid = Backend.lookup_group(name)
         if existing_gid is not None:
@@ -241,7 +253,7 @@ class User(Tool):
             args.append("--system")
         args.append(name)
 
-        rc, _, err = Backend.groupadd(*args)
+        rc, _, err = await Backend.groupadd(*args)
         if rc != 0:
             raise RuntimeError(f"groupadd {name!r} failed:\n{err}")
 
@@ -250,11 +262,11 @@ class User(Tool):
         return GroupResult(name=name, gid=gid_out, changed=True)
 
     @staticmethod
-    def group_absent(name: str) -> bool:
+    async def group_absent(name: str) -> bool:
         """Ensure a group does not exist. Returns True if group was removed."""
         if Backend.lookup_group(name) is None:
             return False
-        rc, _, err = Backend.groupdel(name)
+        rc, _, err = await Backend.groupdel(name)
         if rc != 0:
             raise RuntimeError(f"groupdel {name!r} failed:\n{err}")
         return True

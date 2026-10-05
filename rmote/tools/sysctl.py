@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from rmote.protocol import Tool
+from rmote.requires import needs_linux
 
 
 @dataclass
@@ -45,12 +46,25 @@ class Backend:
 
     @classmethod
     def get_runtime(cls, key: str) -> str:
-        """Read the current runtime value of *key* from ``/proc/sys/``."""
+        """Read the current runtime value of *key* from ``/proc/sys/``.
+
+        Raises:
+            NotImplementedError: The target is not Linux and has no such
+                interface.
+            FileNotFoundError: The target is Linux and has no such key.
+        """
+        needs_linux("Sysctl", "/proc/sys")
         return cls.proc_path(key).read_text().strip()
 
     @classmethod
     def apply(cls, key: str, value: str) -> None:
-        """Apply *key=value* immediately by writing to ``/proc/sys/``."""
+        """Apply *key=value* immediately by writing to ``/proc/sys/``.
+
+        Raises:
+            NotImplementedError: The target is not Linux and has no such
+                interface.
+        """
+        needs_linux("Sysctl", "/proc/sys")
         cls.proc_path(key).write_text(value + "\n")
 
 
@@ -60,6 +74,10 @@ class Sysctl(Tool):
     Runtime values are applied immediately via ``/proc/sys/``.  Changes are
     persisted to a file under :attr:`CONF_DIR` so they survive reboots.
     Requires root.
+
+    The runtime value needs Linux: ``get``, ``present`` and ``converge``
+    refuse with NotImplementedError on another system. ``absent`` only edits
+    the persistent file, which is an ordinary file on any target.
 
     Examples::
 

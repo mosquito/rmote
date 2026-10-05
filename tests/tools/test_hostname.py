@@ -1,5 +1,7 @@
 """Tests for Hostname tool."""
 
+import platform
+import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,17 +11,14 @@ from rmote.tools.hostname import Hostname
 
 
 class TestGet:
-    def test_returns_hostname(self, tmp_path: Path) -> None:
-        f = tmp_path / "hostname"
-        f.write_text("myhost\n")
-        with patch("rmote.tools.hostname._PROC_HOSTNAME", f):
-            assert Hostname.get() == "myhost"
+    def test_returns_the_live_hostname_on_any_target(self) -> None:
+        # socket.gethostname reads the value of the kernel, so no file and no
+        # platform is needed for it.
+        assert Hostname.get() == socket.gethostname()
 
-    def test_strips_trailing_newline(self, tmp_path: Path) -> None:
-        f = tmp_path / "hostname"
-        f.write_text("myhost\n\n")
-        with patch("rmote.tools.hostname._PROC_HOSTNAME", f):
-            assert Hostname.get() == "myhost"
+    def test_needs_no_proc(self, tmp_path: Path) -> None:
+        with patch("rmote.tools.hostname._PROC_HOSTNAME", tmp_path / "absent"):
+            assert Hostname.get() == socket.gethostname()
 
 
 class TestSet:
@@ -27,7 +26,11 @@ class TestSet:
         proc = tmp_path / "hostname"
         etc = tmp_path / "etc_hostname"
         proc.write_text("myhost\n")
-        with patch("rmote.tools.hostname._PROC_HOSTNAME", proc), patch("rmote.tools.hostname._HOSTNAME_FILE", etc):
+        with (
+            patch("rmote.tools.hostname._PROC_HOSTNAME", proc),
+            patch("rmote.tools.hostname._HOSTNAME_FILE", etc),
+            patch.object(platform, "system", lambda: "Linux"),
+        ):
             result = Hostname.set("myhost")
         assert result is False
         assert not etc.exists()
@@ -36,7 +39,11 @@ class TestSet:
         proc = tmp_path / "proc_hostname"
         etc = tmp_path / "etc_hostname"
         proc.write_text("oldhost\n")
-        with patch("rmote.tools.hostname._PROC_HOSTNAME", proc), patch("rmote.tools.hostname._HOSTNAME_FILE", etc):
+        with (
+            patch("rmote.tools.hostname._PROC_HOSTNAME", proc),
+            patch("rmote.tools.hostname._HOSTNAME_FILE", etc),
+            patch.object(platform, "system", lambda: "Linux"),
+        ):
             result = Hostname.set("newhost")
         assert result is True
         assert proc.read_text() == "newhost\n"
@@ -46,7 +53,11 @@ class TestSet:
         proc = tmp_path / "proc_hostname"
         etc = tmp_path / "etc_hostname"
         proc.write_text("old\n")
-        with patch("rmote.tools.hostname._PROC_HOSTNAME", proc), patch("rmote.tools.hostname._HOSTNAME_FILE", etc):
+        with (
+            patch("rmote.tools.hostname._PROC_HOSTNAME", proc),
+            patch("rmote.tools.hostname._HOSTNAME_FILE", etc),
+            patch.object(platform, "system", lambda: "Linux"),
+        ):
             Hostname.set("new")
         assert proc.read_text() == "new\n"
         assert etc.read_text() == "new\n"
@@ -102,3 +113,10 @@ class TestHostsEntry:
         content = f.read_text()
         assert content.startswith("127.0.0.1\tlocalhost\n")
         assert "10.0.0.1\tmyhost\n" in content
+
+
+def test_setting_the_hostname_names_the_platform_it_needs():
+    """A target without the kernel interface says so, and writes nothing."""
+    with patch.object(platform, "system", lambda: "Darwin"):
+        with pytest.raises(NotImplementedError, match="Hostname.set needs the /proc/sys/kernel/hostname"):
+            Hostname.set("whatever")

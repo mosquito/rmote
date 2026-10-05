@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
-from rmote.protocol import Tool, process
+from rmote.process import async_process
+from rmote.protocol import Tool
+from rmote.requires import needs_program
 
 
 class State(IntEnum):
@@ -52,9 +54,10 @@ class Result:
 
 class Backend:
     @staticmethod
-    def pacman(*args: str) -> tuple[int, str, str]:
+    async def pacman(*args: str) -> tuple[int, str, str]:
+        needs_program("Pacman", "pacman", "Arch Linux")
         logging.debug("calling pacman with args: %s", args)
-        result = process(
+        result = await async_process(
             "pacman",
             "--noconfirm",
             *args,
@@ -64,9 +67,9 @@ class Backend:
         return result.returncode, result.stdout, result.stderr
 
     @staticmethod
-    def query(name: str) -> tuple[bool, str]:
+    async def query(name: str) -> tuple[bool, str]:
         """Return (installed, version) for a package."""
-        rc, stdout, _ = Backend.pacman("-Q", name)
+        rc, stdout, _ = await Backend.pacman("-Q", name)
         if rc != 0:
             return False, ""
         parts = stdout.strip().split()
@@ -80,6 +83,9 @@ class Backend:
 
 class Pacman(Tool):
     """Manage Arch Linux packages via pacman. Requires root on the remote host.
+
+    Every operation runs ``pacman``. A target without it refuses with
+    NotImplementedError, which names Arch Linux as what provides it.
 
     Install and remove a package in a disposable Arch Linux container::
 
@@ -95,7 +101,7 @@ class Pacman(Tool):
     """
 
     @staticmethod
-    def update(ttl: int | float = -1) -> bool:
+    async def update(ttl: int | float = -1) -> bool:
         """Synchronise the package database (``pacman -Sy``), with optional TTL-based skipping.
 
         Args:
@@ -117,14 +123,14 @@ class Pacman(Tool):
                 age = float("inf")
             if age < ttl:
                 return False
-        rc, _, err = Backend.pacman("-Sy")
+        rc, _, err = await Backend.pacman("-Sy")
         if rc != 0:
             raise RuntimeError(f"pacman -Sy failed:\n{err}")
         stamp.touch()
         return True
 
     @staticmethod
-    def package(package: str | Package, state: State | int | None = None) -> Result:
+    async def package(package: str | Package, state: State | int | None = None) -> Result:
         """Install, remove, or upgrade a single package.
 
         Args:
@@ -145,45 +151,45 @@ class Pacman(Tool):
         """
         package = Package.parse(package, state=state)
         state = State(package.state)
-        installed, version = Backend.query(package.name)
+        installed, version = await Backend.query(package.name)
 
         if state == State.PRESENT:
             if installed:
                 return Result(name=package.name, version=version, changed=False)
-            rc, _, err = Backend.pacman("-S", package.name)
+            rc, _, err = await Backend.pacman("-S", package.name)
             if rc != 0:
                 raise RuntimeError(f"pacman -S {package.name!r} failed:\n{err}")
-            _, version = Backend.query(package.name)
+            _, version = await Backend.query(package.name)
             return Result(name=package.name, version=version, changed=True)
 
         if state == State.ABSENT:
             if not installed:
                 return Result(name=package.name, version="", changed=False)
-            rc, _, err = Backend.pacman("-R", package.name)
+            rc, _, err = await Backend.pacman("-R", package.name)
             if rc != 0:
                 raise RuntimeError(f"pacman -R {package.name!r} failed:\n{err}")
             return Result(name=package.name, version="", changed=True)
 
         if state == State.LATEST:
             if not installed:
-                rc, _, err = Backend.pacman("-S", package.name)
+                rc, _, err = await Backend.pacman("-S", package.name)
                 if rc != 0:
                     raise RuntimeError(f"pacman -S {package.name!r} failed:\n{err}")
-                _, version = Backend.query(package.name)
+                _, version = await Backend.query(package.name)
                 return Result(name=package.name, version=version, changed=True)
-            _, stdout, _ = Backend.pacman("-Qu")
+            _, stdout, _ = await Backend.pacman("-Qu")
             if package.name not in Backend.parse_upgradable(stdout):
                 return Result(name=package.name, version=version, changed=False)
-            rc, _, err = Backend.pacman("-S", package.name)
+            rc, _, err = await Backend.pacman("-S", package.name)
             if rc != 0:
                 raise RuntimeError(f"pacman -S {package.name!r} failed:\n{err}")
-            _, version = Backend.query(package.name)
+            _, version = await Backend.query(package.name)
             return Result(name=package.name, version=version, changed=True)
 
         raise ValueError(f"Unknown state: {state!r}")
 
     @classmethod
-    def converge(cls, *packages: str | Package) -> list[Result]:
+    async def converge(cls, *packages: str | Package) -> list[Result]:
         """Apply each Package.state; string arguments default to PRESENT.
 
         Args:
@@ -193,4 +199,4 @@ class Pacman(Tool):
             List of :class:`Result` objects, one per package, in the same
             order as the input.
         """
-        return [cls.package(pkg) for pkg in packages]
+        return [await cls.package(pkg) for pkg in packages]

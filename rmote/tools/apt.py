@@ -7,7 +7,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
-from rmote.protocol import Tool, process
+from rmote.process import async_process
+from rmote.protocol import Tool
+from rmote.requires import needs_program
 
 
 class State(IntEnum):
@@ -82,9 +84,10 @@ class Backend:
             return MappingProxyType({})
 
     @staticmethod
-    def apt_get(*args: str) -> tuple[int, str, str]:
+    async def apt_get(*args: str) -> tuple[int, str, str]:
+        needs_program("Apt", "apt-get", "Debian and Ubuntu")
         logging.debug("calling apt-get with args: %s", args)
-        result = process(
+        result = await async_process(
             "apt-get",
             "-y",
             *args,
@@ -108,6 +111,10 @@ class Backend:
 class Apt(Tool):
     """Manage Debian/Ubuntu packages via apt-get. Requires root on the remote host.
 
+    Every operation that changes packages runs ``apt-get``. A target without
+    it refuses with NotImplementedError. The installed set is read from
+    ``/var/lib/dpkg/status``, and an absent file reads as no packages.
+
     Install and remove a package in a disposable Debian container. ``remote``
     is the fixture's synchronous RPC callable (like a ``Connection``)::
 
@@ -125,7 +132,7 @@ class Apt(Tool):
     """
 
     @staticmethod
-    def update(ttl: int | float = -1) -> bool:
+    async def update(ttl: int | float = -1) -> bool:
         """Run ``apt-get update``, with optional TTL-based skipping.
 
         Args:
@@ -147,14 +154,14 @@ class Apt(Tool):
                 age = float("inf")
             if age < ttl:
                 return False
-        rc, _, err = Backend.apt_get("update")
+        rc, _, err = await Backend.apt_get("update")
         if rc != 0:
             raise RuntimeError(f"apt-get update failed:\n{err}")
         stamp.touch()
         return True
 
     @classmethod
-    def package(cls, package: str | Package, state: State | int | None = None) -> Result:
+    async def package(cls, package: str | Package, state: State | int | None = None) -> Result:
         """Install, remove, or upgrade a single package.
 
         Args:
@@ -184,7 +191,7 @@ class Apt(Tool):
         if state == State.PRESENT:
             if installed:
                 return Result(name=package.name, version=version, changed=False)
-            rc, _, err = Backend.apt_get("install", str(package))
+            rc, _, err = await Backend.apt_get("install", str(package))
             if rc != 0:
                 raise RuntimeError(f"apt-get install {package!r} failed:\n{err}")
             version = Backend.read_status().get(package.name, {}).get("Version", "")
@@ -193,22 +200,22 @@ class Apt(Tool):
         if state == State.ABSENT:
             if not installed:
                 return Result(name=package.name, version="", changed=False)
-            rc, _, err = Backend.apt_get("remove", "--purge", str(package))
+            rc, _, err = await Backend.apt_get("remove", "--purge", str(package))
             if rc != 0:
                 raise RuntimeError(f"apt-get remove {package!r} failed:\n{err}")
             return Result(name=package.name, version="", changed=True)
 
         if state == State.LATEST:
             if not installed:
-                rc, _, err = Backend.apt_get("install", str(package))
+                rc, _, err = await Backend.apt_get("install", str(package))
                 if rc != 0:
                     raise RuntimeError(f"apt-get install {package!r} failed:\n{err}")
                 version = Backend.read_status().get(package.name, {}).get("Version", "")
                 return Result(name=package.name, version=version, changed=True)
-            _, sim_out, _ = Backend.apt_get("install", "--simulate", str(package))
+            _, sim_out, _ = await Backend.apt_get("install", "--simulate", str(package))
             if package.name not in Backend.parse_upgradable(sim_out):
                 return Result(name=package.name, version=version, changed=False)
-            rc, _, err = Backend.apt_get("install", str(package))
+            rc, _, err = await Backend.apt_get("install", str(package))
             if rc != 0:
                 raise RuntimeError(f"apt-get upgrade {package!r} failed:\n{err}")
             version = Backend.read_status().get(package.name, {}).get("Version", "")
@@ -217,7 +224,7 @@ class Apt(Tool):
         raise ValueError(f"Unknown state: {state!r}")
 
     @classmethod
-    def converge(cls, *packages: str | Package) -> list[Result]:
+    async def converge(cls, *packages: str | Package) -> list[Result]:
         """Apply each Package.state; string arguments default to PRESENT.
 
         Args:
@@ -228,4 +235,4 @@ class Apt(Tool):
             List of :class:`Result` objects, one per package, in the same order
             as the input.
         """
-        return [cls.package(pkg) for pkg in packages]
+        return [await cls.package(pkg) for pkg in packages]
