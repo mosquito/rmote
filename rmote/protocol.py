@@ -652,9 +652,10 @@ class ToolDispatch(dict[type, Any]):
     it, so a payload of builtin values never asks.
     """
 
-    def __init__(self, reduce_tool: Callable[[Any], Any]) -> None:
+    def __init__(self, known: set[str], sources: dict[str, ModuleSource]) -> None:
         super().__init__()
-        self.reduce_tool = reduce_tool
+        self.known = known
+        self.sources = sources
 
     def __missing__(self, key: type) -> Any:
         if isinstance(key, type) and issubclass(key, ToolMeta):
@@ -663,17 +664,6 @@ class ToolDispatch(dict[type, Any]):
         if reduction is None:
             raise KeyError(key)
         return reduction
-
-
-class ModulePickler(pickle.Pickler):
-    """Discover explicitly transferable modules in arguments and return values."""
-
-    def __init__(self, stream: io.BytesIO, known: set[str]) -> None:
-        # The table must be in place before the base class reads it.
-        self.dispatch_table = ToolDispatch(self.reduce_tool)
-        super().__init__(stream)
-        self.known = known
-        self.sources: dict[str, ModuleSource] = {}
 
     def reduce_tool(self, cls: Any) -> Any:
         """Carry a Tool class by its identity, with its bundle out of band.
@@ -688,6 +678,18 @@ class ModulePickler(pickle.Pickler):
         if sources:
             self.sources.update(sources)
         return tool_from_dict, (definition,)
+
+
+class ModulePickler(pickle.Pickler):
+    """Discover explicitly transferable modules in arguments and return values."""
+
+    def __init__(self, stream: io.BytesIO, known: set[str]) -> None:
+        self.known = known
+        self.sources: dict[str, ModuleSource] = {}
+        # Share state without a bound method that would retain this pickler
+        # and its buffers in a reference cycle. Set the table before super().
+        self.dispatch_table = ToolDispatch(self.known, self.sources)
+        super().__init__(stream)
 
     def persistent_id(self, value: Any) -> None:
         if type(value) in PLAIN_TYPES:
