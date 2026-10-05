@@ -24,6 +24,9 @@ classifiers = [
 ]
 license = { file = "LICENSE" }
 
+[project.scripts]
+rmote-shell = "rmote.shell:main"
+
 [project.urls]
 Homepage = "https://github.com/mosquito/rmote"
 Repository = "https://github.com/mosquito/rmote"

@@ -13,6 +13,7 @@ from rmote.tools.service import Service
 from rmote.tools.sysctl import Sysctl
 from rmote.tools.template import RenderTemplate
 from rmote.tools.user import User
+from rmote.tools.vty import Vty
 
 __all__ = (
     "Apt",
@@ -30,4 +31,5 @@ __all__ = (
     "Sysctl",
     "RenderTemplate",
     "User",
+    "Vty",
 )
