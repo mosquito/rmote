@@ -52,15 +52,19 @@ the connector.
 
 ## Interactive Shell
 
-`rmote-shell` opens an interactive shell on a host. The transport is any command
+`rmote shell` opens an interactive shell on a host. The transport is any command
 that passes stdin and stdout through unchanged, so the same client reaches hosts
 over SSH, containers and pods.
 
 ```bash
-rmote-shell ssh server
-rmote-shell docker exec -i my-container
-rmote-shell kubectl exec -i pod/my-pod --
+rmote shell ssh server
+rmote shell docker exec -i my-container
+rmote shell kubectl exec -i pod/my-pod --
 ```
+
+`python -m rmote` accepts the same commands and options as `rmote`:
+for example, `python -m rmote shell ssh server`. Run `rmote --help` to list
+commands, or `rmote shell --help` for shell options.
 
 The remote side opens a real pseudo terminal, so job control, full screen
 programs and window resizing all work. A redirected input or output uses pipes
