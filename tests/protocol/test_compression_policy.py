@@ -140,11 +140,11 @@ class Recorder:
 @pytest.mark.parametrize(
     ("payload", "compressed"),
     [
-        (b"a" * 512, False),
-        (b"a" * 4096, True),
-        (os.urandom(4096), False),
-        (os.urandom(1 << 20), False),
-        ((b"rmote " * 200000)[: 1 << 20], True),
+        pytest.param(b"a" * 512, False, id="text-512b"),
+        pytest.param(b"a" * 4096, True, id="text-4kib"),
+        pytest.param(os.urandom(4096), False, id="random-4kib"),
+        pytest.param(os.urandom(1 << 20), False, id="random-1mib"),
+        pytest.param((b"rmote " * 200000)[: 1 << 20], True, id="text-1mib"),
     ],
 )
 async def test_the_flag_states_what_the_sender_decided(payload, compressed):
