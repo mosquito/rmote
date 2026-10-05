@@ -264,16 +264,129 @@ class RPCRequest(TypedDict):
     compressed: NotRequired[bool]
 
 
-class LogRecord(TypedDict):
-    name: str
-    levelno: int
-    levelname: str
-    pathname: str
-    lineno: int
-    msg: str
-    args: Any
-    exc_info: Any
-    exc_text: NotRequired[str | None]
+# One record on the wire: logger name, level, source path, line number, the
+# message that the sender already formatted, and the traceback text when there
+# is one. A tuple costs half of what a mapping of the same fields costs to
+# decode, and a record travels in the response of every call that logs.
+LogRecord: TypeAlias = tuple[str, int, str, int, str, str | None]
+
+
+class LogDelivery:
+    """Hand remote records to local handlers outside the protocol loop.
+
+    A handler can take a long time: a file with fsync, a socket, a lock inside
+    logging. The loop thread reads and writes every packet of the connection,
+    so it must not wait for one. It leaves the records in a deque instead, and
+    one worker thread delivers them in arrival order.
+
+    The loop thread only appends, and it wakes the worker only while the worker
+    sleeps. An append costs a tenth of what a queue put costs, and a steady
+    rate of records keeps the worker awake, so the wake-up disappears as well.
+
+    The deque is bounded. When it is full the records are counted and the loss
+    is reported through the ``rmote.remote`` logger, because a peer that logs
+    faster than the handlers accept must not exhaust memory.
+    """
+
+    LIMIT: ClassVar[int] = 10000
+    JOIN_TIMEOUT: ClassVar[float] = 5.0
+
+    def __init__(self, limit: int = LIMIT) -> None:
+        self.limit = limit
+        self.records: deque[LogRecord] = deque()
+        self.wake = threading.Event()
+        self.worker: threading.Thread | None = None
+        self.lost = 0
+        # True only while the worker waits for the event. An append then has
+        # to wake it; otherwise the worker finds the record by itself.
+        self.idle = False
+        self.closing = False
+
+    def deliver(self, records: Sequence[LogRecord]) -> None:
+        """Leave *records* for the worker, and start it on the first batch.
+
+        A record that no local handler accepts is dropped here, on the thread
+        that reads the packet: the test costs a tenth of a microsecond, and it
+        saves the hand-off to the worker and the logging.LogRecord behind it.
+
+        A delivery that was stopped starts no new worker, because the
+        connection that produced the records is gone.
+        """
+        records = [record for record in records if self.target(record[0]).isEnabledFor(record[1])]
+        if not records:
+            return
+        room = max(self.limit - len(self.records), 0)
+        if room < len(records):
+            self.lost += len(records) - room
+            records = records[:room]
+        self.records.extend(records)
+        if self.idle:
+            self.wake.set()
+        if self.worker is None and not self.closing:
+            self.worker = threading.Thread(target=self.run, name="rmote-log-delivery", daemon=True)
+            self.worker.start()
+
+    def run(self) -> None:
+        """Deliver the records that wait, and sleep while none do."""
+        reported = 0
+        while True:
+            try:
+                record = self.records.popleft()
+            except IndexError:
+                if self.closing:
+                    return
+                # Say that this thread sleeps, then look again: a record that
+                # arrived in between found idle unset and woke nobody.
+                self.idle = True
+                if not self.records and not self.closing:
+                    self.wake.wait()
+                self.idle = False
+                self.wake.clear()
+                continue
+            try:
+                self.emit(record)
+            except Exception:  # noqa: BLE001 - a handler must not stop delivery
+                logging.getLogger("rmote.remote").exception("Local handler failed on a remote record")
+            if self.lost > reported:
+                lost, reported = self.lost - reported, self.lost
+                logging.getLogger("rmote.remote").error(
+                    "Dropped %d remote log records: the local delivery queue was full", lost
+                )
+
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def target(name: str) -> logging.Logger:
+        """Give the local logger of a remote name, looked up once per name."""
+        return logging.getLogger(f"rmote.remote.{name}")
+
+    @classmethod
+    def emit(cls, record: LogRecord) -> None:
+        """Pass one remote record to the local handlers of its logger.
+
+        The level of the logger was tested when the record arrived, and it can
+        change while the record waits. The handlers test it again themselves,
+        so a change in either direction is handled.
+        """
+        name, levelno, pathname, lineno, message, traceback_text = record
+        logger = cls.target(name)
+        log_record = logging.LogRecord(
+            name=name, level=levelno, pathname=pathname, lineno=lineno, msg=message, args=(), exc_info=None
+        )
+        log_record.exc_text = traceback_text
+        logger.handle(log_record)
+
+    def stop(self) -> None:
+        """Deliver what waits, then stop the worker.
+
+        Blocks, so a caller on the event loop thread hands this to a thread.
+        """
+        worker = self.worker
+        if worker is None:
+            return
+        self.worker = None
+        self.closing = True
+        self.wake.set()
+        worker.join(self.JOIN_TIMEOUT)
 
 
 # The bootstrap is built once and written to every connection, so it pays for
@@ -1506,6 +1619,7 @@ class BaseProtocol:
 
         protocol = cls(reader, writer)
         log_handler = RemoteLogHandler(protocol, loop)  # type: ignore[arg-type]
+        protocol.log_handler = log_handler  # type: ignore[attr-defined]
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
         root_logger.addHandler(log_handler)
@@ -1605,6 +1719,15 @@ class Protocol(BaseProtocol):
         self._close_error: Exception | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
         self.tools: dict[str, Tool | ModuleType] = dict()
+        self._logs = LogDelivery()
+        # The handler of this side, set when this process is the remote one.
+        # Its records travel with the next response instead of a packet of
+        # their own.
+        self.log_handler: RemoteLogHandler | None = None
+        # Requests that are being served and still owe a response. A record
+        # that appears now has a packet to travel in.
+        self.responses_pending = 0
+
         self._owned_process: asyncio.subprocess.Process | None = None
 
         # Sync ID generation for RPC/SYNC packets
@@ -1658,6 +1781,8 @@ class Protocol(BaseProtocol):
                 pass
             await self._owned_process.wait()
             self._owned_process = None
+        # Records that arrived before the close must reach their handlers.
+        await asyncio.to_thread(self._logs.stop)
 
     async def _load_tool(self, tool_definition: dict[str, Any], _: int) -> None:
         key = tool_key(tool_definition)
@@ -1856,22 +1981,6 @@ class Protocol(BaseProtocol):
         if not future.done():
             future.set_exception(exception)
 
-    @staticmethod
-    async def _handle_log(record: LogRecord, _: int) -> None:
-        """Deliver a remote record to local handlers in the protocol loop thread."""
-        logger = logging.getLogger(f"rmote.remote.{record['name']}")
-        log_record = logging.LogRecord(
-            name=record["name"],
-            level=record["levelno"],
-            pathname=record["pathname"],
-            lineno=record["lineno"],
-            msg=record["msg"],
-            args=record["args"],
-            exc_info=record["exc_info"],
-        )
-        log_record.exc_text = record.get("exc_text")
-        logger.handle(log_record)
-
     def _execute(
         self,
         packet_id: int,
@@ -1896,16 +2005,35 @@ class Protocol(BaseProtocol):
                     await self._send_response(resp, response_flags, packet_id)
             finally:
                 self._compression.reset(token)
+                self.responses_pending -= owed
 
+        # Counted before the task starts, so a record of this call always finds
+        # the response it can travel with.
+        owed = int(need_response)
+        self.responses_pending += owed
         task = asyncio.create_task(wrapper())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _send_response(self, response: Any, flags: Flags, packet_id: int) -> None:
-        """Send a response or a portable serialization error; close after a transport failure."""
+        """Send a response or a portable serialization error; close after a transport failure.
+
+        The log records that gathered while the call ran travel inside this
+        packet, which leaves anyway. A record then costs no packet of its own.
+        The LOG flag marks the pair, and a response without the flag carries
+        the result alone.
+        """
+        handler = self.log_handler
+        batch: list[tuple[logging.LogRecord, LogRecord]] = [] if handler is None else handler.detach()
+        if batch:
+            flags |= Flags.LOG
+            response = ([item[1] for item in batch], response)
         try:
             await self.send(response, flags, packet_id)
         except Exception as error:
+            if handler is not None and batch:
+                # The records never reached the wire, so they keep their place.
+                handler.restore(batch)
             if self.writer.is_closing():
                 self._finish_pending(error)
                 return
@@ -1917,6 +2045,9 @@ class Protocol(BaseProtocol):
             except Exception as fallback_error:
                 self.writer.close()
                 self._finish_pending(fallback_error)
+        else:
+            if handler is not None and batch:
+                handler.sent()
 
     async def wait_closed(self) -> None:
         await self._closed.wait()
@@ -1951,6 +2082,14 @@ class Protocol(BaseProtocol):
                 payload, flags, packet_id = packet.payload, packet.flags, packet.packet_id
                 logging.debug("Received packet %d with flags %r: %r", packet_id, flags, payload)
 
+                if flags & Flags.LOG and flags & Flags.RESPONSE:
+                    # Only an ordinary response carries records. They are
+                    # delivered before the response, so they keep the order of
+                    # the records that travel in a packet of their own.
+                    records, payload = payload
+                    self._logs.deliver(records)
+                    flags &= ~Flags.LOG
+
                 if flags & Flags.STREAM and flags & Flags.REQUEST:
                     self.handle_stream_credit(payload, packet_id)
                     continue
@@ -1976,7 +2115,9 @@ class Protocol(BaseProtocol):
                 elif flags & Flags.EXCEPTION and flags & Flags.RESPONSE:
                     self._execute(packet_id, Flags.EXCEPTION, self._handle_exception, payload, need_response)
                 elif flags & Flags.LOG:
-                    self._execute(packet_id, Flags.LOG, self._handle_log, payload)
+                    # Delivery costs a queue put here. The handlers run in the
+                    # worker thread of LogDelivery.
+                    self._logs.deliver(payload)
         except Exception as e:
             error = e
         finally:
@@ -2272,47 +2413,184 @@ class Protocol(BaseProtocol):
 
 
 class RemoteLogHandler(logging.Handler):
+    """Send records of this side to the peer, grouped into one packet.
+
+    A record waits in a list until the loop runs the next step, and everything
+    that gathered meanwhile travels together. One packet and one task then
+    serve a burst instead of serving every record, and the loop keeps its time
+    for the calls of the connection.
+
+    A response that this side still owes takes the records with it, because
+    that packet leaves anyway. A record of a served call then costs no packet
+    at all. A long call must not hold its records, so they wait no longer than
+    ATTACH_DELAY and then travel alone.
+
+    One batch is on the wire at a time, in a response or in a packet of its
+    own. The next batch waits for it, so the records of one logger arrive in
+    the order they were written.
+    """
+
+    # Time a record waits for a response to carry it. A local round trip takes
+    # about a tenth of this, so an ordinary call wins the race, and a call that
+    # runs longer delays its records by this much only.
+    ATTACH_DELAY: ClassVar[float] = 0.001
+
+    # Limits of one attached batch. A response must keep room inside the frame
+    # of FRAGMENT_SIZE bytes, so a burst does not make it a fragmented packet.
+    ATTACH_RECORDS: ClassVar[int] = 64
+    ATTACH_BYTES: ClassVar[int] = 16 * 1024
+
     def __init__(self, protocol: Protocol, loop: asyncio.AbstractEventLoop, level: int = logging.NOTSET) -> None:
         super().__init__(level)
         self.protocol = protocol
         self.loop = loop
+        # Each entry keeps the local record beside the dictionary that travels,
+        # so a failure to send is reported against the record that caused it.
+        self.pending: list[tuple[logging.LogRecord, LogRecord]] = []
+        # True from the moment a batch is scheduled until the sender finds the
+        # list empty. Both are changed under the lock of the handler.
+        self.draining = False
+        # True while a batch is on the wire. It keeps the batches in order.
+        self.sending = False
+        # Fallback of the records that wait for a response to carry them.
+        self.timer: asyncio.TimerHandle | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
         exc_text = record.exc_text
         if record.exc_info and not exc_text:
             formatter = self.formatter or logging.Formatter()
             exc_text = formatter.formatException(record.exc_info)
-        record_dict = LogRecord(
-            name=record.name,
-            levelno=record.levelno,
-            levelname=record.levelname,
-            pathname=record.pathname,
-            lineno=record.lineno,
-            msg=record.getMessage(),
-            args=(),
-            exc_info=None,
-            exc_text=exc_text,
+        self.pending.append(
+            (record, (record.name, record.levelno, record.pathname, record.lineno, record.getMessage(), exc_text))
         )
-
-        async def send_record() -> None:
-            try:
-                # LOG IDs use the upper end of the unsigned packet ID field.
-                await self.protocol.send(record_dict, Flags.LOG, self.protocol.get_log_id())
-            except Exception:
-                self.handleError(record)
-
-        def schedule() -> None:
-            if self.protocol._closed.is_set():
-                return
-            task = self.loop.create_task(send_record())
-            self.protocol._tasks.add(task)
-            task.add_done_callback(self.protocol._tasks.discard)
-
+        if self.draining:
+            return
+        self.draining = True
         # Synchronous Tool methods emit records from executor threads.
         try:
-            self.loop.call_soon_threadsafe(schedule)
+            self.loop.call_soon_threadsafe(self.start)
         except RuntimeError:
+            self.draining = False
+            self.pending.clear()
             self.handleError(record)
+
+    def start(self) -> None:
+        """Choose how the records that wait travel, on the loop thread."""
+        if self.protocol._closed.is_set():
+            self.acquire()
+            try:
+                self.draining = False
+                self.pending.clear()
+            finally:
+                self.release()
+            return
+        if self.protocol.responses_pending and self.timer is None:
+            # A response is owed and carries the records for free. The timer
+            # sends them alone when no response leaves in time.
+            self.timer = self.loop.call_later(self.ATTACH_DELAY, self.send_alone)
+            return
+        self.send_alone()
+
+    def send_alone(self) -> None:
+        """Send the records that wait in a packet of their own."""
+        self.timer = None
+        task = self.loop.create_task(self.drain())
+        self.protocol._tasks.add(task)
+        task.add_done_callback(self.protocol._tasks.discard)
+
+    def detach(self) -> list[tuple[logging.LogRecord, LogRecord]]:
+        """Take the records that wait, for a response to carry them.
+
+        Gives an empty list when the records must not travel this way: another
+        batch is on the wire, or the batch is too large for the response to
+        stay in one frame. The records then keep their place and their own
+        packet. The caller reports the result with sent() or restore().
+        """
+        self.acquire()
+        try:
+            if self.sending or not self.pending or len(self.pending) > self.ATTACH_RECORDS:
+                return []
+            if sum(self.weight(item[1]) for item in self.pending) > self.ATTACH_BYTES:
+                return []
+            batch, self.pending = self.pending, []
+            self.sending = True
+        finally:
+            self.release()
+        if self.timer is not None:
+            # The response replaces the fallback. Only the loop thread detaches
+            # a batch, so the timer is cancelled from the thread that owns it.
+            self.timer.cancel()
+            self.timer = None
+        return batch
+
+    @staticmethod
+    def weight(record: LogRecord) -> int:
+        """Report the text bytes of *record*, as an estimate of its size."""
+        *_, message, traceback_text = record
+        return len(message) + len(traceback_text or "")
+
+    def sent(self) -> None:
+        """Report that an attached batch reached the wire."""
+        self.resume([])
+
+    def restore(self, batch: list[tuple[logging.LogRecord, LogRecord]]) -> None:
+        """Put an attached batch that never reached the wire back in its place."""
+        self.resume(batch)
+
+    def resume(self, batch: list[tuple[logging.LogRecord, LogRecord]]) -> None:
+        """Free the wire for the next batch, and send what waits."""
+        self.acquire()
+        try:
+            self.sending = False
+            if batch:
+                self.pending[:0] = batch
+            again = bool(self.pending) and not self.draining
+            if again:
+                self.draining = True
+            elif not self.pending:
+                # Nothing waits any more, so the next record schedules its own
+                # send. A record that finds draining set schedules nothing.
+                self.draining = False
+        finally:
+            self.release()
+        if again:
+            self.start()
+
+    async def drain(self) -> None:
+        """Send everything that gathered, until nothing is left."""
+        while True:
+            self.acquire()
+            try:
+                if self.sending:
+                    # A response carries the records that came first. It sends
+                    # what is left after its own batch reaches the wire.
+                    self.draining = False
+                    return
+                batch, self.pending = self.pending, []
+                if not batch:
+                    self.draining = False
+                    return
+                self.sending = True
+            finally:
+                self.release()
+            try:
+                # LOG IDs use the upper end of the unsigned packet ID field.
+                await self.protocol.send([item[1] for item in batch], Flags.LOG, self.protocol.get_log_id())
+            except Exception:
+                self.acquire()
+                try:
+                    self.draining = False
+                    self.sending = False
+                finally:
+                    self.release()
+                for record, _ in batch:
+                    self.handleError(record)
+                return
+            self.acquire()
+            try:
+                self.sending = False
+            finally:
+                self.release()
 
 
 async def run() -> None:

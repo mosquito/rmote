@@ -249,6 +249,8 @@ def soak(rounds: int) -> dict[str, Any]:
                 received.set()
 
     logger = logging.getLogger("rmote.remote.rmote-bench")
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
     handler = Capture()
     logger.addHandler(handler)
     before = snapshot()
@@ -292,6 +294,7 @@ def soak(rounds: int) -> dict[str, Any]:
                 raise AssertionError("Idle EOF did not close the connection")
     finally:
         logger.removeHandler(handler)
+        logger.setLevel(previous_level)
         handler.close()
     after = snapshot()
     assert after["threads"] == before["threads"], "Threads leaked after soak"

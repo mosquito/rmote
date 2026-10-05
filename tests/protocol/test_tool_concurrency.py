@@ -182,8 +182,9 @@ async def test_executor_logs_are_sent_and_tracked_in_protocol_loop(client, monke
         await asyncio.to_thread(logger.warning, "log from executor %s", "ok")
         await received.wait()
         assert sender_threads == [threading.get_ident()]
-        assert payloads[0]["msg"] == "log from executor ok"
-        assert payloads[0]["args"] == ()
+        # Records travel in batches, so one packet carries a list, and a
+        # record is a tuple whose fifth field is the formatted message.
+        assert payloads[0][0][4] == "log from executor ok"
         assert len(client._tasks) == 1
         release.set()
         await asyncio.gather(*client._tasks)
@@ -250,7 +251,7 @@ async def test_real_subprocess_forwards_sync_async_and_idle_logs(protocol):
 
     messages = []
     threads = []
-    idle = asyncio.Event()
+    idle = threading.Event()
 
     class Capture(logging.Handler):
         def emit(self, record):
@@ -266,8 +267,10 @@ async def test_real_subprocess_forwards_sync_async_and_idle_logs(protocol):
         assert await protocol(LogTool.emit_sync) == "sync"
         assert await protocol(LogTool.emit_async) == "async"
         await protocol(LogTool.schedule_idle)
-        await idle.wait()
+        assert await asyncio.to_thread(idle.wait, 10)
         assert set(messages) == {"sync record", "async record", "idle record"}
-        assert threads == [threading.get_ident()] * 3
+        # Handlers run in the delivery worker, never in the loop thread.
+        assert threading.get_ident() not in threads
+        assert len(set(threads)) == 1
     finally:
         logger.removeHandler(handler)

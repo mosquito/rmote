@@ -1,9 +1,12 @@
 """Low-level protocol tests for error cases and edge coverage"""
 
 import asyncio
+import base64
 import gzip
 import pickle
 import struct
+import sys
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -11,13 +14,21 @@ import pytest
 from rmote.protocol import (
     BaseProtocol,
     Flags,
+    LogDelivery,
     Protocol,
     RemoteLogHandler,
     Tool,
     bootstrap_packer,
+    bootstrap_payload,
     tool_from_dict,
     tool_to_dict,
 )
+
+
+class Packets(BaseProtocol):
+    """Protocol that compresses each packet, without the frame codec."""
+
+    FRAME_CODEC = False
 
 
 class MockTransport:
@@ -62,7 +73,9 @@ class TestProtocolLowLevel:
         writer.is_closing.return_value = False
         writer.drain = AsyncMock()
         reader = asyncio.StreamReader()
-        proto = BaseProtocol(reader, writer)
+        # The gzip of a whole packet is the packet policy; the frame codec
+        # compresses each frame instead, and test_frame_codec.py covers it.
+        proto = Packets(reader, writer)
         packet = b"x" * size
         await proto.send(packet, Flags.RPC | Flags.REQUEST, 42)
         wire = writer.write.call_args.args[0]
@@ -138,6 +151,37 @@ class TestBootstrapPacker:
         exec(packed, {})
         assert capsys.readouterr().out == "hello\n"
 
+    def test_the_payload_is_built_once_for_the_process(self) -> None:
+        first = bootstrap_payload()
+        assert bootstrap_payload() is first
+        assert bootstrap_payload.cache_info().misses == 1
+
+    def test_the_payload_carries_the_protocol_source(self) -> None:
+        encoded = bootstrap_payload().split(b"'''")[1]
+        source = gzip.decompress(base64.b64decode(encoded))
+        assert b"class Protocol" in source
+        assert b"sys.modules['rmote.protocol']" in source
+
+    @pytest.mark.asyncio
+    async def test_every_connection_receives_the_same_bootstrap(self) -> None:
+        written: list[bytes] = []
+        original = asyncio.StreamWriter.write
+
+        def watched(self: Any, data: Any) -> None:
+            if bytes(data).startswith(b"from gzip import decompress"):
+                written.append(bytes(data))
+            original(self, data)
+
+        asyncio.StreamWriter.write = watched  # type: ignore[method-assign]
+        try:
+            for _ in range(2):
+                async with await Protocol.from_command(python=sys.executable) as remote:
+                    assert remote is not None
+        finally:
+            asyncio.StreamWriter.write = original  # type: ignore[method-assign]
+        assert len(written) == 2
+        assert written[0] == written[1] == bootstrap_payload()
+
 
 class TestHighLevelProtocolEdgeCases:
     @pytest.mark.asyncio
@@ -165,17 +209,8 @@ class TestHighLevelProtocolEdgeCases:
         import logging
         import pickle
 
-        log_payload = {
-            "name": "myapp",
-            "levelno": logging.INFO,
-            "levelname": "INFO",
-            "pathname": "/remote/app.py",
-            "lineno": 42,
-            "msg": "loop_log_sentinel %s",
-            "args": ("ok",),
-            "exc_info": None,
-        }
-        pickled = pickle.dumps(log_payload)
+        log_payload = ("myapp", logging.INFO, "/remote/app.py", 42, "loop_log_sentinel ok", None)
+        pickled = pickle.dumps([log_payload])
         header = BaseProtocol.PACKET_HEADER.pack(BaseProtocol.MAGIC, int(Flags.LOG), len(pickled), 0)
 
         reader = asyncio.StreamReader()
@@ -186,8 +221,8 @@ class TestHighLevelProtocolEdgeCases:
 
         with caplog.at_level(logging.INFO, logger="rmote.remote"):
             await proto._loop()
-            # Let wrapper task and _handle_log task drain
-            await asyncio.sleep(0.01)
+            # The worker of LogDelivery owns the handlers, so wait for it.
+            await asyncio.to_thread(proto._logs.stop)
 
         assert "loop_log_sentinel ok" in caplog.text
 
@@ -239,18 +274,10 @@ class TestProtocolInternals:
         """_handle_log reconstructs and dispatches a LogRecord."""
         import logging
 
-        log_payload = {
-            "name": "myapp",
-            "levelno": logging.INFO,
-            "levelname": "INFO",
-            "pathname": "/remote/app.py",
-            "lineno": 10,
-            "msg": "hello %s",
-            "args": ("world",),
-            "exc_info": None,
-        }
+        # The sender formats the message, so the record carries the text.
+        log_payload = ("myapp", logging.INFO, "/remote/app.py", 10, "hello world", None)
         with caplog.at_level(logging.INFO, logger="rmote.remote.myapp"):
-            await Protocol._handle_log(log_payload, 0)  # type: ignore[arg-type]
+            LogDelivery.emit(log_payload)
         assert "hello world" in caplog.text
 
     @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from rmote.protocol import Flags, LogRecord, Protocol, RemoteLogHandler, Tool
+from rmote.protocol import Flags, LogDelivery, LogRecord, Protocol, RemoteLogHandler, Tool
 from rmote.sync import Connection
 
 pytestmark = pytest.mark.timeout(10)
@@ -43,7 +43,9 @@ async def serialize_record(
         except Exception as exc:
             result.set_exception(exc)
         else:
-            result.set_result(packet)
+            # One packet carries a batch; these tests send a single record.
+            assert len(packet) == 1
+            result.set_result(packet[0])
 
     monkeypatch.setattr(proto, "send", capture)
     handler = RemoteLogHandler(proto, loop)
@@ -68,10 +70,16 @@ async def test_exception_log_is_serializable(monkeypatch):
     record = exception_record()
     exc_info = record.exc_info
     packet = await serialize_record(record, monkeypatch)
-    assert packet["msg"] == "failed operation"
-    assert packet["args"] == ()
-    assert packet["exc_info"] is None
-    assert "ValueError: traceback detail" in (packet["exc_text"] or "")
+    name, levelno, pathname, lineno, message, traceback_text = packet
+    # Only plain data travels: the message is formatted and exc_info stays here.
+    assert (name, levelno, pathname, lineno, message) == (
+        "exception-test",
+        logging.ERROR,
+        __file__,
+        1,
+        "failed operation",
+    )
+    assert "ValueError: traceback detail" in (traceback_text or "")
     assert record.exc_info is exc_info
     assert record.exc_text is None
 
@@ -87,35 +95,36 @@ async def test_exception_formatter_and_cached_text_are_preserved(monkeypatch, ca
     if cached:
         record.exc_text = "cached exception text"
     packet = await serialize_record(record, monkeypatch, Formatter())
-    assert packet["exc_text"] == ("cached exception text" if cached else "custom exception text")
+    *_, traceback_text = packet
+    assert traceback_text == ("cached exception text" if cached else "custom exception text")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_receiver_formats_traceback_text_and_accepts_legacy_records(monkeypatch, legacy):
+@pytest.mark.parametrize("carried", [True, False])
+async def test_receiver_keeps_the_traceback_text(monkeypatch, carried):
     packet = await serialize_record(exception_record(), monkeypatch)
-    text = packet.get("exc_text")
-    if legacy:
-        del packet["exc_text"]
+    text = packet[-1]
+    if not carried:
+        packet = (*packet[:-1], None)
     records: list[logging.LogRecord] = []
     logger = logging.getLogger("rmote.remote.exception-test")
     monkeypatch.setattr(logger, "handle", records.append)
-    await Protocol._handle_log(packet, 1)
+    LogDelivery.emit(packet)
     received = records[0]
     assert received.exc_info is None
-    assert received.exc_text == (None if legacy else text)
+    assert received.exc_text == (text if carried else None)
     formatted = logging.Formatter("%(message)s").format(received)
     assert formatted.startswith("failed operation")
-    assert formatted.count("ValueError: traceback detail") == (0 if legacy else 1)
+    assert formatted.count("ValueError: traceback detail") == (1 if carried else 0)
 
 
 @pytest.mark.asyncio
 async def test_plain_log_has_no_exception_text(monkeypatch):
     record = logging.LogRecord("plain", logging.INFO, __file__, 1, "hello %s", ("world",), None)
     packet = await serialize_record(record, monkeypatch)
-    assert packet["msg"] == "hello world"
-    assert packet["exc_info"] is None
-    assert packet["exc_text"] is None
+    *_, message, traceback_text = packet
+    assert message == "hello world"
+    assert traceback_text is None
 
 
 @pytest.mark.asyncio
