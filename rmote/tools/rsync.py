@@ -126,7 +126,7 @@ class Rsync(Tool):
         delete: bool = False,
         concurrency: int = 4,
         preserve_mode: bool = True,
-        block_size: int = 1024 * 1024,
+        block_size: int = 4 * 1024 * 1024,
         owner: str | None = None,
         group: str | None = None,
         exclude: Iterable[str] = (),
@@ -140,7 +140,8 @@ class Rsync(Tool):
             delete: Remove destination-only entries after successful transfers.
             concurrency: Maximum simultaneous file transfers (positive integer).
             preserve_mode: Copy source file and directory permission bits.
-            block_size: FileSync block size, between 1 byte and 16 MiB.
+            block_size: FileSync block size, between 1 byte and 16 MiB;
+                defaults to 4 MiB. A file costs about two calls per block.
             owner: Explicit destination username; None keeps normal ownership.
             group: Explicit destination group name; None keeps normal grouping.
             exclude: Glob patterns for paths to leave untouched on both sides.
@@ -180,7 +181,7 @@ class Rsync(Tool):
         delete: bool = False,
         concurrency: int = 4,
         preserve_mode: bool = True,
-        block_size: int = 1024 * 1024,
+        block_size: int = 4 * 1024 * 1024,
         owner: str | None = None,
         group: str | None = None,
         exclude: Iterable[str] = (),
@@ -194,7 +195,8 @@ class Rsync(Tool):
             delete: Remove destination-only entries after successful transfers.
             concurrency: Maximum simultaneous file transfers (positive integer).
             preserve_mode: Copy source file and directory permission bits.
-            block_size: FileSync block size, between 1 byte and 16 MiB.
+            block_size: FileSync block size, between 1 byte and 16 MiB;
+                defaults to 4 MiB. A file costs about two calls per block.
             owner: Explicit destination username; None keeps normal ownership.
             group: Explicit destination group name; None keeps normal grouping.
             exclude: Glob patterns for paths to leave untouched on both sides.
@@ -433,25 +435,38 @@ class Rsync(Tool):
 
         uid, gid = await call(target_remote, Rsync.ownership, owner, group)
 
-        async def metadata(path: str, mode: int | None = None) -> None:
+        # Transfers that are running now, at most *concurrency* of them.
+        active: set[asyncio.Task[None]] = set()
+
+        async def reap(when: str = asyncio.FIRST_COMPLETED) -> None:
+            """Wait for running transfers and raise the first failure of them."""
+            if not active:
+                return
+            done, _ = await asyncio.wait(active, return_when=when)
+            active.difference_update(done)
+            for task in done:
+                task.result()
+
+        async def metadata(path: str, mode: int | None = None, present: int | None = None) -> None:
             if owner is not None or group is not None:
                 result.changed |= await call(target_remote, Rsync.chown, path, uid, gid)
-            if preserve_mode and mode is not None:
+            # The scan reported the mode of both sides, and FileSync preserves
+            # the mode of a destination it replaces, so an equal mode costs no
+            # call at all.
+            if preserve_mode and mode is not None and mode != present:
                 result.changed |= await call(target_remote, Rsync.chmod, path, mode)
 
-        async def file(relative: Path, entry: Entry) -> None:
-            # Recheck the final components immediately before FileSync opens them.
-            for side, root in ((source_remote, src), (target_remote, dst)):
-                current = await call(side, Rsync.inspect, str(Path(root) / relative))
-                if current is not None and current.kind != "file":
-                    raise ValueError(f"File type changed: {relative}")
+        async def file(relative: Path, entry: Entry, present: Entry | None) -> None:
+            # FileSync opens both ends with O_NOFOLLOW and refuses anything but
+            # a regular file, so a name replaced after the scan is rejected
+            # there, without a call of our own to look at it again.
             fn = FileSync.upload if uploading else FileSync.download
             item = await fn(protocol, Path(src) / relative, Path(dst) / relative, block_size=block_size)
             result.files += 1
             result.transferred += item.transferred
             result.reused += item.reused
             result.changed |= item.changed
-            await metadata(str(Path(dst) / relative), entry.mode)
+            await metadata(str(Path(dst) / relative), entry.mode, present.mode if present is not None else None)
 
         async def walk(relative: Path, finishing: bool = False) -> None:
             source = str(Path(src) / relative)
@@ -477,26 +492,20 @@ class Rsync(Tool):
                 if name in existing and existing[name].kind != entry.kind:
                     raise ValueError(f"Type conflict: {Path(target) / name}")
             if not finishing:
-                batch: list[asyncio.Task[None]] = []
-                try:
-                    for name, entry in entries.items():
-                        if entry.kind == "file":
-                            batch.append(asyncio.create_task(file(relative / name, entry)))
-                            if len(batch) == concurrency:
-                                await asyncio.gather(*batch)
-                                batch.clear()
-                        elif entry.kind == "symlink":
-                            assert entry.target is not None
-                            changed = await call(target_remote, Rsync.link, str(Path(target) / name), entry.target)
-                            await metadata(str(Path(target) / name))
-                            result.symlinks += changed
-                            result.changed |= changed
-                    await asyncio.gather(*batch)
-                finally:
-                    for task in batch:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*batch, return_exceptions=True)
+                for name, entry in entries.items():
+                    if entry.kind == "file":
+                        # A sliding window: a transfer starts as soon as any
+                        # running one finishes, so one slow file does not hold
+                        # back the rest, and the window spans directories.
+                        while len(active) >= concurrency:
+                            await reap()
+                        active.add(asyncio.create_task(file(relative / name, entry, existing.get(name))))
+                    elif entry.kind == "symlink":
+                        assert entry.target is not None
+                        changed = await call(target_remote, Rsync.link, str(Path(target) / name), entry.target)
+                        await metadata(str(Path(target) / name))
+                        result.symlinks += changed
+                        result.changed |= changed
             for name, entry in entries.items():
                 if entry.kind == "directory":
                     await walk(relative / name, finishing)
@@ -515,6 +524,14 @@ class Rsync(Tool):
                 mode = (await call(source_remote, Rsync.inspect, source)).mode
                 await metadata(target, mode)
 
-        await walk(Path("."))
+        try:
+            await walk(Path("."))
+            # Every transfer must finish before the second pass sets the modes
+            # of the directories and removes what the source does not have.
+            await reap(asyncio.ALL_COMPLETED)
+        finally:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
         await walk(Path("."), finishing=True)
         return result

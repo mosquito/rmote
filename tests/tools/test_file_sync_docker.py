@@ -11,6 +11,8 @@ from rmote.protocol import Protocol
 from rmote.tools import Exec, FileSync
 
 MIB = 1024 * 1024
+# The default block size of FileSync. A changed byte makes one block cross.
+BLOCK = 4 * MIB
 
 
 def file_digest(path: Path) -> str:
@@ -58,7 +60,7 @@ async def test_docker_file_sizes(
         assert not repeated.changed
         assert (repeated.size, repeated.transferred, repeated.reused) == (size, 0, size)
 
-    # Change one byte in the middle; exactly one 1 MiB block must cross each way.
+    # Change one byte in the middle; exactly one block must cross each way.
     with source.open("r+b") as stream:
         stream.seek(size // 2)
         original = stream.read(1)
@@ -71,7 +73,8 @@ async def test_docker_file_sizes(
         await FileSync.download(docker_protocol, remote_path, downloaded),
     ):
         assert incremental.changed
-        assert (incremental.size, incremental.transferred, incremental.reused) == (size, MIB, size - MIB)
+        crossed = min(BLOCK, size)
+        assert (incremental.size, incremental.transferred, incremental.reused) == (size, crossed, size - crossed)
     assert file_digest(downloaded) == updated
     checksum = await docker_protocol(Exec.command, "sha256sum", remote_path, capture_output=True)
     assert checksum.stdout is not None

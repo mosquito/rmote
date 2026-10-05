@@ -9,6 +9,7 @@ import stat
 import pytest
 
 from rmote.tools import FileSync, Rsync
+from rmote.tools.file_sync import Batch, SyncResult
 
 
 @pytest.fixture(params=["upload", "download"])
@@ -158,7 +159,7 @@ async def test_failure_settles_transfers_and_prevents_delete(protocol, tmp_path,
             active.add(args[0])
             peak = max(peak, len(active))
         result = await protocol(method, *args)
-        if method == FileSync._close:
+        if method == FileSync._close or (method == FileSync._step and done(result)):
             active.discard(args[0])
         if method == FileSync._step and not triggered:
             triggered = True
@@ -184,6 +185,11 @@ async def test_failure_settles_transfers_and_prevents_delete(protocol, tmp_path,
 pytestmark = pytest.mark.asyncio
 
 
+def done(message: object) -> bool:
+    """True when a step ended its side of the exchange and closed its session."""
+    return isinstance(message, SyncResult) or (isinstance(message, Batch) and message.digest is not None)
+
+
 @pytest.mark.parametrize("direction", ["upload", "download"])
 async def test_bounded_parallel_transfers(protocol, tmp_path, direction):
     source, target = tmp_path / "src", tmp_path / "dst"
@@ -203,8 +209,11 @@ async def test_bounded_parallel_transfers(protocol, tmp_path, direction):
             if len(active) == 2:
                 two_started.set()
             await asyncio.wait_for(two_started.wait(), 5)
+        elif method == FileSync._step and done(result):
+            # A session closes itself on its own final message.
+            active.discard(args[0])
         elif method == FileSync._close:
-            active.remove(args[0])
+            active.discard(args[0])
         return result
 
     result = await getattr(Rsync, direction)(remote, source, target, concurrency=2, block_size=4)
