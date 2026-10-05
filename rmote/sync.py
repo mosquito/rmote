@@ -416,7 +416,7 @@ class Connection:
             raise RuntimeError("Connection is closing or closed")
         future = self._runtime.submit(lambda: self._invoke(timeout, tool, args, kwargs, compressed))
         try:
-            return future.result()
+            return self._runtime.result(future)
         except KeyboardInterrupt:
             future.cancel()
             try:

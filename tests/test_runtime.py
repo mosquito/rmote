@@ -5,6 +5,7 @@ import contextvars
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from types import AsyncGeneratorType
@@ -212,6 +213,75 @@ print('clean interrupt')
     assert process.returncode == 0, process.stderr
     assert process.stdout.strip() == "clean interrupt"
     assert not process.stderr
+
+
+def test_interrupt_from_outside_the_process_stops_a_main_thread_wait() -> None:
+    """A terminal signal must stop the wait, whichever thread receives it.
+
+    The sender is another process, so only the main thread and the threads of
+    the runtime can receive the signal, as with a terminal. The wait of the
+    main thread must end for every signal, including one that arrives just
+    before the wait starts.
+    """
+    script = """
+import asyncio
+import os
+import subprocess
+import sys
+import threading
+import time
+from rmote._runtime import _Runtime
+
+SENDER = "import os, signal, sys, time; time.sleep(0.05); os.kill(int(sys.argv[1]), signal.SIGINT)"
+runtime = _Runtime()
+try:
+    for attempt in range(6):
+        entered = threading.Event()
+
+        async def wait():
+            entered.set()
+            await asyncio.Event().wait()
+
+        future = runtime.submit(wait)
+        assert entered.wait(5)
+        sender = subprocess.Popen([sys.executable, "-c", SENDER, str(os.getpid())])
+        started = time.monotonic()
+        try:
+            runtime.result(future)
+        except KeyboardInterrupt:
+            elapsed = time.monotonic() - started
+            assert elapsed < 2, f"attempt {attempt}: the interrupt needed {elapsed:.2f}s"
+        else:
+            raise AssertionError(f"attempt {attempt}: no KeyboardInterrupt")
+        finally:
+            future.cancel()
+            sender.wait()
+    assert runtime.run(lambda: asyncio.sleep(0, result=5)) == 5
+finally:
+    runtime.close()
+print("every interrupt arrived")
+"""
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0, process.stderr
+    assert process.stdout.strip() == "every interrupt arrived"
+
+
+def test_result_respects_a_timeout_in_the_main_thread_and_in_a_worker(runtime: _Runtime) -> None:
+    """Both waits of result() end on time: the sliced one and the plain one."""
+    future = runtime.submit(lambda: asyncio.Event().wait())
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            runtime.result(future, 0.1)
+        assert 0.05 < time.monotonic() - started < 2
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                pool.submit(runtime.result, future, 0.1).result(5)
+            assert 0.05 < time.monotonic() - started < 2
+    finally:
+        future.cancel()
+        runtime.wait(future, timeout=5)
 
 
 def test_loop_thread_rejects_submit_run_and_close(runtime: _Runtime) -> None:
