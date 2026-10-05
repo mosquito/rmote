@@ -1,3 +1,4 @@
+from rmote.tools import facts
 from rmote.tools.apt import Apt
 from rmote.tools.apt_repository import AptRepository
 from rmote.tools.exec import Exec
@@ -16,6 +17,7 @@ from rmote.tools.user import User
 from rmote.tools.vty import Vty
 
 __all__ = (
+    "facts",
     "Apt",
     "AptRepository",
     "Exec",

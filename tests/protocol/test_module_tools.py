@@ -214,6 +214,38 @@ def run():
     assert all(result == package.Record(42, 1) for result in results)
 
 
+@pytest.mark.asyncio
+async def test_class_tool_preserves_imports_and_uses_cached_bundle(tmp_path, monkeypatch, isolated_remote):
+    (tmp_path / "facts_class_probe.py").write_text("""from rmote.protocol import Tool
+from rmote.tools.facts.collectors import PythonFacts
+from rmote.tools.fs import FileSystem
+
+class Probe(Tool):
+    @staticmethod
+    def gather():
+        return PythonFacts.collect().version
+
+    @staticmethod
+    def exists(path):
+        return FileSystem.stat(path).exists
+""")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module = importlib.import_module("facts_class_probe")
+    try:
+        with patch.object(ModuleBundle, "source", wraps=ModuleBundle.source) as read:
+            definition = tool_to_dict(module.Probe)
+            reads = read.call_count
+            assert reads > 0
+            for _ in range(10):
+                assert tool_to_dict(module.Probe) == definition
+            assert read.call_count == reads
+        assert (
+            "from rmote.tools.facts.collectors import PythonFacts" in definition["sources"][module.__name__]["source"]
+        )
+        assert await isolated_remote(module.Probe.gather)
+        assert await isolated_remote(module.Probe.exists, str(tmp_path))
+    finally:
+        sys.modules.pop(module.__name__, None)
 
 
 def test_the_key_of_a_definition_is_the_one_the_peer_registers():
