@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from rmote.protocol import process
+from rmote.process import process
 
 
 def test_process_text_input():
