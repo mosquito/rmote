@@ -240,7 +240,7 @@ Append this template to `deploy.py`:
 
 <!-- name: test_quickstart; case: template -->
 ```python
-from rmote.protocol import Template
+from rmote.templates import Template
 
 PORT = 6380
 SERVICE = "rmote-cache.service"
@@ -255,7 +255,7 @@ After=network.target
 Type=notify
 User=redis
 Group=redis
-ExecStart=/usr/bin/redis-server --bind 127.0.0.1 --port ${port} --supervised systemd --daemonize no --save "" --appendonly no --maxmemory ${memory} --maxmemory-policy allkeys-lru
+ExecStart=/usr/bin/redis-server --bind 127.0.0.1 --port {{ port }} --supervised systemd --daemonize no --save "" --appendonly no --maxmemory {{ memory }} --maxmemory-policy allkeys-lru
 Restart=on-failure
 TimeoutStartSec=30
 
@@ -264,7 +264,7 @@ WantedBy=multi-user.target
 ''').render(port=PORT, memory="64mb")
 ```
 
-`${port}` and `${memory}` are template variables. `Template.render` replaces
+`{{ port }}` and `{{ memory }}` are template variables. `Template.render` replaces
 them locally and returns a string. No template engine is needed on the target.
 The {doc}`templating` guide also covers conditions, loops, and remote rendering.
 

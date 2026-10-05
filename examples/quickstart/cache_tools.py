@@ -1,4 +1,5 @@
-from rmote.protocol import Tool, process
+from rmote.process import process
+from rmote.protocol import Tool
 
 
 class Cache(Tool):
