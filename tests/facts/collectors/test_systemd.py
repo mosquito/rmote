@@ -13,6 +13,46 @@ from rmote.tools.facts.collectors import SystemdFacts, SystemdResolvedFacts, Sys
 from rmote.tools.facts.collectors.systemd import SystemdCommand
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["255.6", "258", "259~rc1", "259", "260"])
+async def test_resolved_json_status_requires_systemd_259(monkeypatch, version):
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "is_dir", lambda path: True)
+    supported = version.startswith(("259", "260"))
+
+    async def run(executable, *arguments):
+        if "--property=ActiveState" in arguments:
+            return "LoadState=loaded\nActiveState=active\nSubState=running\n"
+        if arguments == ("--version",):
+            return f"systemd {version} (distribution build)\n+PAM +AUDIT\n"
+        assert supported and arguments == ("--json=short", "status")
+        return '[{"servers": [], "ifname": "eth0"}]'
+
+    monkeypatch.setattr(SystemdCommand, "run", run)
+    result = await SystemdResolvedFacts.collect()
+    assert result.available and result.manager_available
+    assert result.service is not None and result.service["ActiveState"] == "active"
+    assert result.status == ([{"servers": [], "ifname": "eth0"}] if supported else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", ["not json", "{}", "[null]"])
+async def test_resolved_does_not_hide_invalid_supported_status(monkeypatch, output):
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "is_dir", lambda path: True)
+
+    async def run(executable, *arguments):
+        if "--property=ActiveState" in arguments:
+            return "ActiveState=active\n"
+        if arguments == ("--version",):
+            return "systemd 259\n"
+        return output
+
+    monkeypatch.setattr(SystemdCommand, "run", run)
+    with pytest.raises(ValueError):
+        await SystemdResolvedFacts.collect()
+
+
 def test_systemd_records_preserve_names_and_fields():
     assert SystemdFacts.unit_records('[{"unit":"foo@bar.service","active":"failed","sub":"failed"}]', "unit") == {
         "foo@bar.service": {"unit": "foo@bar.service", "active": "failed", "sub": "failed"}

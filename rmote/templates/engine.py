@@ -176,6 +176,9 @@ class TemplateLexer:
             next(tokens)
             for token in tokens:
                 position = offsets[token.start[0] - 1] + token.start[1]
+                if token.type == tokenize.ERRORTOKEN and token.string in {"'", '"'}:
+                    # Python 3.11 reports an unfinished string as error tokens.
+                    raise self.source.error(f"Unterminated string in template {kind}", opening)
                 if token.type == tokenize.OP:
                     if depth == 0:
                         if template.startswith(closing, position):

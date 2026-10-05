@@ -36,6 +36,19 @@ class Counting(Protocol):
 
 
 class Streamer(Tool):
+    gate: asyncio.Event
+
+    @classmethod
+    async def gated(cls) -> AsyncIterator[int]:
+        cls.gate = asyncio.Event()
+        yield 0
+        await cls.gate.wait()
+        yield 1
+
+    @classmethod
+    async def release(cls) -> None:
+        cls.gate.set()
+
     @staticmethod
     async def counted(count: int) -> AsyncIterator[int]:
         for number in range(count):
@@ -446,16 +459,13 @@ class TestBatches:
     @pytest.mark.asyncio
     async def test_a_producer_that_waits_does_not_hold_its_item(self, protocol: Protocol) -> None:
         """An item that is alone travels at once, so batching adds no delay."""
-        start = time.perf_counter()
-        arrived = []
-        async for _ in protocol(Streamer.slowly, 3, 0.1):
-            arrived.append(time.perf_counter() - start)
-
-        assert len(arrived) == 3
-        # Every item waits for its own delay, and none waits for the next one.
-        assert arrived[0] < 0.2
-        assert arrived[1] - arrived[0] > 0.05
-        assert arrived[2] - arrived[1] > 0.05
+        async with asyncio.timeout(5), contextlib.aclosing(protocol.stream(Streamer.gated)) as items:
+            assert await anext(items) == 0
+            # The next item cannot exist until the consumer receives the first.
+            await protocol(Streamer.release)
+            assert await anext(items) == 1
+            with pytest.raises(StopAsyncIteration):
+                await anext(items)
 
     def test_a_batch_round_trips_in_order(self) -> None:
         values = [1, "two", b"three", [4], {"five": 5}]

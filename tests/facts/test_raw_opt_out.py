@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from rmote.tools import facts
-from rmote.tools.facts.collectors import CpuFacts, MemoryFacts
+from rmote.tools.facts.collectors import CpuFacts, MemoryFacts, cgroup
 from tests.support.tool_cases.loud_facts import LINES, LoudFacts
 
 pytestmark = pytest.mark.timeout(60)
@@ -53,7 +53,14 @@ def size(value: object) -> int:
 def linux_sources(monkeypatch):
     """Serve synthetic Linux sources to the processor and memory collectors."""
     cpuinfo = "\n".join(CPU_BLOCK.format(index=index, flags=FLAGS) for index in range(16))
-    sources = {"/proc/cpuinfo": cpuinfo, "/proc/meminfo": MEMINFO}
+    sources = {
+        "/proc/cpuinfo": cpuinfo,
+        "/proc/meminfo": MEMINFO,
+        "/proc/self/cgroup": "0::/\n",
+        "/sys/fs/cgroup/memory.max": "8192\n",
+        "/sys/fs/cgroup/memory.current": "4096\n",
+        "/sys/fs/cgroup/cpu.max": "100000 100000\n",
+    }
 
     def read_cpu(path: Path) -> str | None:
         return sources.get(str(path))
@@ -64,6 +71,7 @@ def linux_sources(monkeypatch):
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(CpuFacts, "read_text", staticmethod(read_cpu))
     monkeypatch.setattr(MemoryFacts, "read_text", staticmethod(read_memory))
+    monkeypatch.setattr(cgroup, "read_text", read_cpu)
     return sources
 
 
@@ -75,6 +83,7 @@ def test_a_branch_without_its_texts_keeps_every_parsed_field(linux_sources):
     assert lean_cpu.raw == lean_memory.raw == {}
     assert replace(cpu, raw={}) == lean_cpu
     assert replace(memory, raw={}) == lean_memory
+    assert lean_memory.usage_bytes == 4096
 
 
 def test_the_texts_are_most_of_a_snapshot(linux_sources):

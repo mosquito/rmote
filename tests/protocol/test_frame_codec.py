@@ -7,6 +7,8 @@ alone. The peer therefore inflates exactly the bodies that were deflated.
 
 import asyncio
 import os
+import pickle
+import random
 import sys
 import zlib
 from typing import Any, cast
@@ -165,3 +167,26 @@ async def test_a_frame_above_the_limit_is_refused_on_arrival():
     instance = BaseProtocol(reader, cast(Any, None))
     with pytest.raises(ValueError, match="above the limit"):
         await instance.receive()
+
+
+@pytest.mark.asyncio
+async def test_a_full_compressed_fragment_can_grow_on_the_wire():
+    rng = random.Random(0)
+    # Low diversity in the sample does not guarantee repeated byte sequences.
+    data = bytes(value % 128 for value in rng.randbytes(256)) + rng.randbytes(BaseProtocol.FRAGMENT_SIZE)
+    payload = pickle.dumps(data)
+    codec = compressor()
+    reader = asyncio.StreamReader()
+    for offset in range(0, len(payload), BaseProtocol.FRAGMENT_SIZE):
+        chunk = payload[offset : offset + BaseProtocol.FRAGMENT_SIZE]
+        body, packed = codec.encode(chunk)
+        flags = Flags.RPC | (Flags.COMPRESSED if packed else 0)
+        if offset + len(chunk) < len(payload):
+            flags |= Flags.FRAGMENT
+        if offset == 0:
+            assert packed and len(body) > BaseProtocol.FRAGMENT_SIZE
+        reader.feed_data(BaseProtocol.PACKET_HEADER.pack(BaseProtocol.MAGIC, flags, len(body), 1) + body)
+    reader.feed_eof()
+    instance = BaseProtocol(reader, cast(Any, None))
+    instance.inflate = FrameDecompressor(BaseProtocol.FRAGMENT_SIZE)
+    assert (await instance.receive()).payload == data

@@ -206,7 +206,13 @@ class ProcessSession(Session):
 
     async def release(self) -> None:
         if self.process.returncode is None:
-            await end_process(self.process)
+            # Output EOF can arrive before asyncio records the child's exit.
+            # Give the watcher time to reap it before sending a signal, which
+            # can steal the exit status on older Python versions.
+            try:
+                await asyncio.wait_for(self.process.wait(), 0.1)
+            except TimeoutError:
+                await end_process(self.process)
 
     async def wait(self) -> int:
         return await self.process.wait()

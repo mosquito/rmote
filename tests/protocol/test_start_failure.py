@@ -96,3 +96,21 @@ async def test_a_silent_transport_still_reports_the_symptom():
 async def test_a_working_connection_is_unaffected():
     async with await Protocol.from_command(python=sys.executable) as remote:
         assert remote is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_handshake_reaps_the_owned_process():
+    remote = await Protocol.from_command("sh", "-c", "exec 1>&- 2>&-; exec sleep 60")
+    process = remote._owned_process
+    assert process is not None
+    try:
+        with pytest.raises(ConnectionError, match="before PROTOCOL READY"):
+            async with remote:
+                pass
+        assert process.returncode is not None
+        assert remote._owned_process is None
+        assert remote._stderr_task is None
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()

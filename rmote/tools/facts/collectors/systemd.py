@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,9 +210,9 @@ class SystemdResolvedFacts(Tool):
     Missing binaries or an unbooted manager are indicated by ``available`` and
     ``manager_available``; unavailable sections are None. A stopped/missing
     resolved is not started. Queries never resolve names or flush caches.
-    resolvectl must support JSON status output; errors from an active daemon
-    propagate. Privileged monitoring/statistics are not collected. Each query
-    has a 30-second timeout.
+    Before systemd 259, resolvectl cannot report JSON status, so ``status`` is
+    None. Errors from supported queries propagate. Privileged monitoring and
+    statistics are not collected. Each query has a 30-second timeout.
     """
 
     key = "systemd_resolved"
@@ -235,6 +236,12 @@ class SystemdResolvedFacts(Tool):
         service = await SystemdCommand.service(control, "systemd-resolved.service")
         result.service = service
         if service.get("ActiveState") in ("active", "reloading"):
+            version = await SystemdCommand.run(executable, "--version")
+            match = re.match(r"systemd (\d+)", version)
+            if match is None:
+                raise ValueError("Expected a systemd version from resolvectl")
+            if int(match[1]) < 259:
+                return result
             status = json.loads(await SystemdCommand.run(executable, "--json=short", "status"))
             if not isinstance(status, list) or any(not isinstance(item, dict) for item in status):
                 raise ValueError("Expected a JSON array of objects from resolvectl status")

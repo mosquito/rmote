@@ -79,6 +79,29 @@ async def test_the_close_does_not_wait_for_the_capture():
     assert task.cancelled() or task.done()
 
 
+@pytest.mark.asyncio
+async def test_close_releases_paused_pipes_after_the_process_exits():
+    remote = await Protocol.from_command(python=sys.executable)
+    process = remote._owned_process
+    assert process is not None
+    transport = process._transport  # type: ignore[attr-defined]
+    try:
+        async with remote:
+            # A full reader pauses its pipe. The process can exit before the
+            # reader resumes and sees EOF, so wait() alone cannot release it.
+            transport.get_pipe_transport(1).pause_reading()
+            transport.get_pipe_transport(2).pause_reading()
+            process.terminate()
+            async with asyncio.timeout(5):
+                while process.returncode is None:
+                    await asyncio.sleep(0.001)
+        assert transport.is_closing()
+        assert all(transport.get_pipe_transport(fd).is_closing() for fd in (0, 1, 2))
+    finally:
+        transport.close()
+        await process.wait()
+
+
 def test_the_failure_names_both_streams():
     said = ["rmote remote failed to start: ValueError: broken"]
     transport = ["Traceback (most recent call last):", "ValueError: broken"]

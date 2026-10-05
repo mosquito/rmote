@@ -1036,10 +1036,14 @@ class BaseProtocol:
                 flags = Flags(raw_flags)
                 if magic != self.MAGIC:
                     raise ValueError("Invalid magic number")
-                if length > self.FRAGMENT_SIZE:
-                    # Every frame of this protocol fits the limit, so a larger
-                    # one means a broken or hostile peer.
-                    raise ValueError(f"Frame of {length} bytes is above the limit of {self.FRAGMENT_SIZE}")
+                limit = self.FRAGMENT_SIZE
+                if flags & Flags.COMPRESSED and self.inflate is not None:
+                    # A density sample can accept incompressible data. Allow
+                    # deflate's block overhead and the sync-flush boundary;
+                    # FrameDecompressor still bounds the decoded body.
+                    limit += (limit >> 12) + (limit >> 14) + 32
+                if length > limit:
+                    raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
                 chunk = await self.reader.readexactly(length)
                 if flags & Flags.COMPRESSED and self.inflate is not None:
                     # The dictionary follows the wire, so the body is inflated
@@ -1646,8 +1650,13 @@ class Protocol(BaseProtocol):
             return self.__last_log_id
 
     async def __aenter__(self) -> Self:
-        await self.write_boundary()
-        await self.read_boundary()
+        try:
+            await self.write_boundary()
+            await self.read_boundary()
+        except BaseException:
+            # A failed __aenter__ is not followed by __aexit__ by Python.
+            await self.__aexit__(*sys.exc_info())
+            raise
         self._loop_task = asyncio.create_task(self._loop())
         return self
 
@@ -1662,9 +1671,8 @@ class Protocol(BaseProtocol):
         await asyncio.gather(*tasks, return_exceptions=True)
         self._loop_task = None
         if self._stderr_task is not None:
-            # The close does not wait for this task: it reads a pipe that the
-            # transport closes when it ends.
             self._stderr_task.cancel()
+            await asyncio.gather(self._stderr_task, return_exceptions=True)
             self._stderr_task = None
         self.writer.close()
         try:
@@ -1676,6 +1684,10 @@ class Protocol(BaseProtocol):
                 self._owned_process.terminate()
             except ProcessLookupError:
                 pass
+            # Process.wait() can return as soon as returncode is set, even
+            # with paused or inherited output pipes still open. asyncio has
+            # no public Process.close(); the owned transport closes all pipes.
+            self._owned_process._transport.close()  # type: ignore[attr-defined]
             await self._owned_process.wait()
             self._owned_process = None
         # Records that arrived before the close must reach their handlers.

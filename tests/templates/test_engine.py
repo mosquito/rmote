@@ -220,6 +220,7 @@ def test_comments_escapes_and_whitespace(source, expected):
         ("{% if True %}{% else %}{% else %}{% endif %}", "Unexpected else after else", "{% else %}{% endif"),
         ("\n{#- ignore -#}\n\n   {% if + %}{% endif %}", "Unexpected end", "{% if"),
         ('{{ "unterminated }}', "unterminated|unclosed", "{{"),
+        ("{{ 'unterminated }}", "unterminated|unclosed", "{{"),
     ],
 )
 def test_source_diagnostics(source, message, marker):
