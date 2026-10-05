@@ -1,0 +1,27 @@
+- case: cache_is_generic_in_tool_result_without_fact_schema
+  main: |
+    from collections.abc import Mapping
+    from dataclasses import dataclass
+    from typing import assert_type
+    from rmote.cache import Cache
+
+    @dataclass
+    class Result:
+        count: int
+
+    cache = Cache[Result]()
+    cache.update({"task": Result(1)})
+    assert_type(cache["task"], Result)
+    assert_type(cache.data, Mapping[str, Result])
+    assert_type(cache.get("task"), Result | None)
+
+- case: cache_rejects_wrong_value_type_and_key_mutation
+  mypy_config: |
+    python_version = 3.11
+    warn_unused_ignores = True
+  main: |
+    from rmote.cache import Cache
+    cache = Cache[int]()
+    cache.update({"tool": "wrong"})  # type: ignore[dict-item]
+    cache.data["tool"] = 2  # type: ignore[index]
+    cache["tool"] = 2  # type: ignore[index]

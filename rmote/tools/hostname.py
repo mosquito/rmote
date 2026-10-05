@@ -1,6 +1,8 @@
+import socket
 from pathlib import Path
 
 from rmote.protocol import Tool
+from rmote.requires import needs_linux
 
 _HOSTNAME_FILE = Path("/etc/hostname")
 _HOSTS_FILE = Path("/etc/hosts")
@@ -9,6 +11,10 @@ _PROC_HOSTNAME = Path("/proc/sys/kernel/hostname")
 
 class Hostname(Tool):
     """Manage system hostname and ``/etc/hosts`` entries. Requires root for mutating operations.
+
+    ``get`` and ``hosts_entry`` work on any POSIX target. ``set`` writes the
+    kernel interface ``/proc/sys/kernel/hostname`` and therefore needs Linux;
+    on another system it refuses with NotImplementedError.
 
     Change the hostname in a disposable container with its own UTS namespace::
 
@@ -32,13 +38,14 @@ class Hostname(Tool):
     def get() -> str:
         """Return the current running hostname.
 
-        Reads from ``/proc/sys/kernel/hostname`` which always reflects the
-        live kernel value regardless of what ``/etc/hostname`` contains.
+        ``socket.gethostname`` reads the live value of the kernel, which is
+        what ``/etc/hostname`` configures but does not necessarily hold. It
+        answers on every target, so this method needs no Linux.
 
         Returns:
             The hostname string.
         """
-        return _PROC_HOSTNAME.read_text().strip()
+        return socket.gethostname()
 
     @staticmethod
     def set(name: str) -> bool:
@@ -53,7 +60,12 @@ class Hostname(Tool):
         Returns:
             ``True`` if the hostname was changed, ``False`` if it was already
             set to *name*.
+
+        Raises:
+            NotImplementedError: The target is not Linux, so it has no
+                ``/proc/sys/kernel/hostname`` to write.
         """
+        needs_linux("Hostname.set", "/proc/sys/kernel/hostname")
         current = _PROC_HOSTNAME.read_text().strip()
         if current == name:
             return False

@@ -115,6 +115,33 @@ def test_cancel_running_request_runs_its_cleanup(runtime: _Runtime) -> None:
     assert runtime.run(lambda: asyncio.sleep(0, result=2)) == 2
 
 
+def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime) -> None:
+    entered = threading.Event()
+    cleaned = threading.Event()
+
+    async def wait() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            cleaned.set()
+
+    future = runtime.submit(wait)
+    assert entered.wait(5)
+    assert future.cancel()
+    # A caller that gave up still owns the operation, so wait() returns only
+    # after the loop has finished with it.
+    runtime.wait(future)
+    assert cleaned.is_set()
+
+
+def test_wait_on_a_finished_future_returns_at_once(runtime: _Runtime) -> None:
+    future = runtime.submit(lambda: asyncio.sleep(0, result=1))
+    assert future.result(5) == 1
+    runtime.wait(future)
+
+
 def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime) -> None:
     cleaned = threading.Event()
 

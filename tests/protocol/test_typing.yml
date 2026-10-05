@@ -1,0 +1,126 @@
+- case: call_tool_basic
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def add(a: int, b: int) -> int:
+            return a + b
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.add, 10, 20)
+        reveal_type(result)  # N: Revealed type is "builtins.int"
+
+- case: call_tool_string_return
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def greet(name: str) -> str:
+            return f"Hello, {name}"
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.greet, "World")
+        reveal_type(result)  # N: Revealed type is "builtins.str"
+
+- case: call_tool_kwargs
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class MyTool(Tool):
+        @staticmethod
+        def concat(s1: str, s2: str) -> str:
+            return s1 + s2
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(MyTool.concat, s1="hello", s2="world")
+        reveal_type(result)  # N: Revealed type is "builtins.str"
+
+- case: call_tool_async_method
+  main: |
+    from rmote.protocol import Protocol, Tool
+
+    class AsyncTool(Tool):
+        @staticmethod
+        async def async_add(a: int, b: int) -> int:
+            return a + b
+
+    async def test(proto: Protocol) -> None:
+        result = await proto(AsyncTool.async_add, 5, 10)
+        reveal_type(result)  # N: Revealed type is "builtins.int"
+
+- case: remote_result_shapes_and_keyword_names
+  main: |
+    from collections.abc import AsyncGenerator, AsyncIterator
+    from dataclasses import dataclass
+    from typing import TypeVar, assert_type
+    from rmote.protocol import Protocol, Tool
+
+    T = TypeVar('T')
+
+    @dataclass
+    class Report:
+        value: int
+
+    class Methods(Tool):
+        @staticmethod
+        def identity(value: T) -> T:
+            return value
+
+        @classmethod
+        async def report(cls, *, tool: int) -> Report:
+            return Report(tool)
+
+        @staticmethod
+        async def items(*, tool: int) -> AsyncIterator[Report]:
+            yield Report(tool)
+
+    async def check(remote: Protocol) -> None:
+        assert_type(await remote(Methods.identity, 1), int)
+        assert_type(await remote(Methods.identity, Report(2)), Report)
+        assert_type(await remote(Methods.identity, None), None)
+        assert_type(await remote(Methods.report, tool=3), Report)
+        assert_type(remote(Methods.items, tool=4), AsyncGenerator[Report, None])
+        assert_type(remote.stream(Methods.items, tool=5), AsyncGenerator[Report, None])
+        async for item in remote(Methods.items, tool=6):
+            assert_type(item, Report)
+        async for item in remote.stream(Methods.items, tool=7):
+            assert_type(item, Report)
+
+- case: remote_invalid_arguments_results_and_stream_methods_are_rejected
+  mypy_config: |
+    python_version = 3.11
+    warn_unused_ignores = True
+  main: |
+    from collections.abc import AsyncIterator
+    from rmote.protocol import Protocol, Tool
+
+    class Methods(Tool):
+        @staticmethod
+        def add(a: int, *, b: int) -> int:
+            return a + b
+
+        @staticmethod
+        async def async_add(a: int, *, b: int) -> int:
+            return a + b
+
+        @staticmethod
+        async def items(count: int) -> AsyncIterator[int]:
+            yield count
+
+    async def check(remote: Protocol) -> None:
+        await remote(Methods.add, 'wrong', b=2)  # type: ignore[arg-type, misc]
+        await remote(Methods.async_add, 1)  # type: ignore[call-overload]
+        await remote(Methods.add, 1, 2)  # type: ignore[call-overload]
+        result = await remote(Methods.add, 1, b=2)
+        wrong: str = result  # type: ignore[assignment]
+        async_result = await remote(Methods.async_add, 1, b=2)
+        wrong_async: str = async_result  # type: ignore[assignment]
+        remote(Methods.items, 'wrong')  # type: ignore[call-overload]
+        remote.stream(Methods.items, 'wrong')  # type: ignore[arg-type]
+        remote.stream(Methods.items)  # type: ignore[call-arg]
+        remote.stream(Methods.add, 1, b=2)  # type: ignore[arg-type]
+        await remote(Methods.items, 1)  # type: ignore[misc]
+        async for item in remote(Methods.items, 1):
+            wrong_item: str = item  # type: ignore[assignment]

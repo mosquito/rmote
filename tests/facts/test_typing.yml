@@ -1,0 +1,154 @@
+- case: fact_collectors_preserve_models_through_both_remote_clients
+  main: |
+    from typing import assert_type
+    from rmote.protocol import Protocol
+    from rmote.sync import Connection
+    from rmote.tools.facts.collectors import (
+        AptFacts, NetworkdFacts, NetworkFacts, PacmanFacts, PythonFacts,
+        SystemdFacts, SystemdResolvedFacts, SystemdTimesyncFacts, SystemFacts,
+    )
+    from rmote.tools.facts.collectors.apt import AptInfo
+    from rmote.tools.facts.collectors.network import NetworkdInfo, NetworkInfo
+    from rmote.tools.facts.collectors.pacman import PacmanInfo
+    from rmote.tools.facts.collectors.python import PythonInfo
+    from rmote.tools.facts.collectors.system import SystemInfo
+    from rmote.tools.facts.collectors.systemd import SystemdInfo, ResolvedInfo, TimesyncInfo
+
+    async def check(remote: Protocol, sync: Connection) -> None:
+        assert_type(SystemFacts.collect(), SystemInfo)
+        assert_type(PythonFacts.collect(), PythonInfo)
+        assert_type(await NetworkFacts.collect(), NetworkInfo)
+        assert_type(await remote(SystemFacts.collect), SystemInfo)
+        assert_type(await remote(PythonFacts.collect), PythonInfo)
+        assert_type(await remote(NetworkFacts.collect), NetworkInfo)
+        assert_type(await remote(NetworkdFacts.collect), NetworkdInfo)
+        assert_type(await remote(AptFacts.collect), AptInfo)
+        assert_type(await remote(PacmanFacts.collect), PacmanInfo)
+        assert_type(await remote(SystemdFacts.collect), SystemdInfo)
+        assert_type(await remote(SystemdTimesyncFacts.collect), TimesyncInfo)
+        assert_type(await remote(SystemdResolvedFacts.collect), ResolvedInfo)
+        assert_type(sync(SystemFacts.collect), SystemInfo)
+        assert_type(sync(PythonFacts.collect), PythonInfo)
+        assert_type(sync(NetworkFacts.collect), NetworkInfo)
+        assert_type(sync(NetworkdFacts.collect), NetworkdInfo)
+        assert_type(sync(AptFacts.collect), AptInfo)
+        assert_type(sync(PacmanFacts.collect), PacmanInfo)
+        assert_type(sync(SystemdFacts.collect), SystemdInfo)
+        assert_type(sync(SystemdTimesyncFacts.collect), TimesyncInfo)
+        assert_type(sync(SystemdResolvedFacts.collect), ResolvedInfo)
+        assert_type(sync.call_with_timeout(None, NetworkFacts.collect), NetworkInfo)
+
+- case: generic_collectors_keep_their_result_type
+  main: |
+    from typing import TypeVar, assert_type
+    from rmote.protocol import Protocol
+    from rmote.sync import Connection
+    from typing import Any
+    from rmote.tools.facts.schema import Collector, FactsData
+    from rmote.serialization import Dataclass
+    from rmote.cache import Cache
+    from rmote.tools import facts
+
+    T = TypeVar('T', bound=Dataclass)
+
+    async def check(
+        remote: Protocol, sync: Connection, cache: Cache[Any],
+        collector: Collector[T],
+    ) -> None:
+        assert_type(await remote(collector.collect), T)
+        assert_type(sync(collector.collect), T)
+        assert_type(sync.call_with_timeout(None, collector.collect), T)
+        gathered = await facts.fetch(remote)
+        cache.update(gathered)
+        saved = facts.validate(cache.data)
+        assert_type(gathered, FactsData)
+        assert_type(saved, FactsData)
+
+- case: fact_snapshot_models_and_nested_fields_are_typed
+  main: |
+    from typing import assert_type
+    from rmote.tools.facts.schema import FactsData
+    from rmote.tools.facts.collectors.apt import AptInfo, AptPackage
+    from rmote.tools.facts.collectors.network import DefaultRoute, NetworkFamily, NetworkdInfo, NetworkInfo
+    from rmote.tools.facts.collectors.pacman import PacmanInfo
+    from rmote.tools.facts.collectors.python import PythonInfo
+    from rmote.tools.facts.collectors.system import SystemInfo
+    from rmote.tools.facts.collectors.systemd import SystemdInfo, ResolvedInfo, TimesyncInfo
+
+    def check(snapshot: FactsData) -> None:
+        assert_type(snapshot["system"], SystemInfo)
+        assert_type(snapshot["python"], PythonInfo)
+        assert_type(snapshot["network"], NetworkInfo)
+        assert_type(snapshot.get("network"), NetworkInfo | None)
+        assert_type(snapshot["networkd"], NetworkdInfo)
+        assert_type(snapshot["apt"], AptInfo)
+        assert_type(snapshot["pacman"], PacmanInfo)
+        assert_type(snapshot["systemd"], SystemdInfo)
+        assert_type(snapshot["systemd_timesync"], TimesyncInfo)
+        assert_type(snapshot["systemd_resolved"], ResolvedInfo)
+        assert_type(snapshot["system"].hostname, str)
+        assert_type(snapshot["network"].ipv4, NetworkFamily)
+        assert_type(snapshot["network"].default.ipv4, DefaultRoute | None)
+        assert_type(snapshot["apt"].packages, dict[str, AptPackage] | None)
+
+- case: invalid_fact_fields_result_assignments_and_arguments_are_rejected
+  mypy_config: |
+    python_version = 3.11
+    warn_unused_ignores = True
+  main: |
+    from rmote.protocol import Protocol
+    from typing import Any
+    from rmote.cache import Cache
+    from rmote.tools.facts.schema import FactsData
+    from rmote.tools import facts
+    from rmote.tools.facts.collectors import NetworkFacts
+    from rmote.tools.facts.collectors.system import SystemInfo
+
+    async def check(remote: Protocol, cache: Cache[Any], snapshot: FactsData) -> None:
+        result = await remote(NetworkFacts.collect)
+        wrong: SystemInfo = result  # type: ignore[assignment]
+        result.hostname  # type: ignore[attr-defined]
+        snapshot["system"].missing  # type: ignore[attr-defined]
+        snapshot["network"].default.ipv4.gateway  # type: ignore[union-attr]
+        snapshot[42]  # type: ignore[literal-required]
+        await remote(NetworkFacts.collect, unexpected=True)  # type: ignore[call-overload]
+        await facts.fetch(remote, sections=42)  # type: ignore[arg-type]
+
+- case: facts_schema_can_be_extended_and_keys_are_optional
+  main: |
+    from typing import assert_type, cast
+    from typing import Any
+    from rmote.cache import Cache
+    from rmote.tools.facts.schema import FactsData
+    from rmote.tools import facts
+    from rmote.protocol import Protocol
+    from tests.facts.tools import CounterFacts, CounterInfo
+
+    class ProjectFacts(FactsData, total=False):
+        counter: CounterInfo
+
+    async def check(remote: Protocol) -> None:
+        empty: FactsData = {}
+        project: ProjectFacts = {}
+        cache = Cache[Any](versions={c.key: c.version for c in [CounterFacts]})
+        gathered = cast(ProjectFacts, await facts.fetch(remote, collectors=[CounterFacts]))
+        cache.update(gathered)
+        saved = cast(ProjectFacts, cache.data)
+        assert_type(gathered['counter'], CounterInfo)
+        assert_type(saved['counter'], CounterInfo)
+        assert_type(project['counter'].calls, int)
+
+- case: facts_reject_class_keys_unknown_keys_and_wrong_values
+  mypy_config: |
+    python_version = 3.11
+    warn_unused_ignores = True
+  main: |
+    from rmote.tools.facts.schema import FactsData
+    from rmote.tools.facts.collectors import NetworkFacts
+    from rmote.tools.facts.collectors.python import PythonInfo
+
+    def check(facts: FactsData, key: str, wrong: PythonInfo) -> None:
+        facts[NetworkFacts]  # type: ignore[literal-required]
+        facts['unknown']  # type: ignore[typeddict-item]
+        facts[key]  # type: ignore[literal-required]
+        facts['network'] = wrong  # type: ignore[typeddict-item]

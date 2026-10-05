@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rmote.protocol import Tool
+from rmote.requires import needs_file
 
 _PACMAN_CONF = Path("/etc/pacman.conf")
 _KEYRINGS_DIR = Path("/etc/pacman.d")
@@ -40,6 +41,10 @@ class PacmanRepository(Tool):
     GPG key files are stored in ``/etc/pacman.d/``. All operations are
     idempotent and require root.
 
+    Every operation needs the ``/etc/pacman.conf`` configuration of Arch
+    Linux. A target without it refuses with NotImplementedError instead of
+    writing a file that nothing reads.
+
 
     Update pacman.conf inside a disposable Arch Linux container. The example
     repository is only written to disk; it is not contacted::
@@ -72,6 +77,7 @@ class PacmanRepository(Tool):
         Returns:
             :class:`Result` indicating whether the key was written.
         """
+        needs_file("PacmanRepository.key", _PACMAN_CONF, "Arch Linux")
         _KEYRINGS_DIR.mkdir(parents=True, exist_ok=True)
         path = _KEYRINGS_DIR / name
         if path.exists() and path.read_bytes() == data:
@@ -101,6 +107,7 @@ class PacmanRepository(Tool):
         Returns:
             :class:`Result` indicating whether ``pacman.conf`` was modified.
         """
+        needs_file("PacmanRepository.present", _PACMAN_CONF, "Arch Linux")
         section = _build_section(name, servers, sig_level)
         content = _PACMAN_CONF.read_text()
         bounds = _section_bounds(content, name)
@@ -126,6 +133,7 @@ class PacmanRepository(Tool):
         Returns:
             :class:`Result` indicating whether ``pacman.conf`` was modified.
         """
+        needs_file("PacmanRepository.absent", _PACMAN_CONF, "Arch Linux")
         content = _PACMAN_CONF.read_text()
         bounds = _section_bounds(content, name)
         if bounds is None:

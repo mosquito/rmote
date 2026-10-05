@@ -13,24 +13,29 @@ pytestmark = pytest.mark.timeout(60)
 class TestExecLocal:
     """Unit tests that run Exec locally without Docker."""
 
-    def test_command_success(self) -> None:
-        result = Exec.command("true", check=False)
+    @pytest.mark.asyncio
+    async def test_command_success(self) -> None:
+        result = await Exec.command("true", check=False)
         assert result.returncode == 0
 
-    def test_command_failure_no_check(self) -> None:
-        result = Exec.command("false", check=False)
+    @pytest.mark.asyncio
+    async def test_command_failure_no_check(self) -> None:
+        result = await Exec.command("false", check=False)
         assert result.returncode != 0
 
-    def test_command_check_raises(self) -> None:
+    @pytest.mark.asyncio
+    async def test_command_check_raises(self) -> None:
         with pytest.raises(subprocess.CalledProcessError):
-            Exec.command("false", check=True)
+            await Exec.command("false", check=True)
 
-    def test_shell_success(self) -> None:
-        result = Exec.shell("true", check=False)
+    @pytest.mark.asyncio
+    async def test_shell_success(self) -> None:
+        result = await Exec.shell("true", check=False)
         assert result.returncode == 0
 
-    def test_shell_failure_no_check(self) -> None:
-        result = Exec.shell("false", check=False)
+    @pytest.mark.asyncio
+    async def test_shell_failure_no_check(self) -> None:
+        result = await Exec.shell("false", check=False)
         assert result.returncode != 0
 
 

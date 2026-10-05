@@ -19,6 +19,8 @@ with `Connection()` raises `TypeError`.
 
    .. automethod:: rmote.sync.Connection.call_with_timeout
 
+   .. automethod:: rmote.sync.Connection.uncompressed
+
    .. automethod:: rmote.sync.Connection.close
 
    .. automethod:: rmote.sync.Connection.__enter__
@@ -43,6 +45,14 @@ the default RPC deadline for one call. It includes the first Tool upload,
 packet transmission, and response. All keyword arguments go to the Tool
 method, including arguments named `timeout` or `tool`.
 
+`connection.uncompressed(tool, /, *args, **kwargs)` calls without
+compressing the request or the response. Use it for data that cannot
+shrink, such as an archive or an image: those bytes then skip the
+dictionary of the connection instead of paying a deflate pass that gains
+nothing. The call keeps the default deadline, every argument belongs to
+the Tool method, and a neighbouring call keeps its own policy. See
+{ref}`the frame codec <frame-compression>`.
+
 Timeout raises `TimeoutError`. `KeyboardInterrupt` propagates unchanged.
 Both stop local waiting; the remote operation can continue. Cancellation
 during packet transmission can make the connection unusable. Close it and
@@ -66,9 +76,20 @@ Context exit preserves an exception raised by the body; cleanup errors are
 logged when a body exception already exists.
 
 Multiple caller threads can share an open connection. Remote log records run
-local logging handlers in the background loop thread. Handlers must be thread
-safe and must not call this connection's synchronous methods. Calls from its
-own loop thread raise `RuntimeError`.
+local logging handlers in a delivery thread, so the time a handler takes does
+not limit the throughput of calls. Handlers must be thread safe and must not
+call this connection's synchronous methods, because `close()` waits for the
+records that are still queued. Calls from the loop thread of the connection
+raise `RuntimeError`.
+
+The throughput of one connection flattens as caller threads are added, because
+the interpreter lock serializes the Python work of every call. On a local
+transport with a tool that returns at once, one connection served 4 500 calls
+per second from one thread, 15 900 from eight, 19 000 from sixteen, 21 500 from
+thirty-two and 23 400 from sixty-four; the next doubling added 4 percent. The
+CPU the loop thread spends per call falls the whole way, from 62 to 30
+microseconds, so nothing collapses past the knee: a wider pool simply stops
+paying off. Open a second connection when one is not enough.
 
 In async applications, use `Protocol` or move the complete synchronous
 lifecycle into `asyncio.to_thread`. A direct synchronous call blocks the

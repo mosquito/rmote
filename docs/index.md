@@ -13,7 +13,6 @@ python -m pip install rmote
 The target needs Python 3.11 or newer but no rmote installation. rmote sends
 tool code over the connection when it is first used. Package and service tools
 require their system commands and sufficient permissions on the target.
-Windows remote hosts are not supported.
 
 ## Start with a Deployment
 
@@ -27,9 +26,11 @@ the connector.
 | Task | Guide |
 |---|---|
 | Write a remote operation and return Python data | {doc}`writing-tools` |
+| Collect and cache host state | {doc}`api/tools/facts` |
 | Apply an operation to several hosts | {doc}`multi-host` |
 | Synchronize file contents in either direction | {doc}`api/tools/file_sync` |
 | Render a configuration file | {doc}`templating` |
+| Write and transfer a custom template filter | {doc}`template-filters` |
 | Find a built-in operation | {doc}`api/tools/index` |
 | Configure synchronous connections and deadlines | {doc}`api/sync` |
 | Use connections from an async application | {doc}`api/protocol` |
@@ -46,8 +47,10 @@ client unpickles returned data.
 
 quickstart
 writing-tools
+shell
 multi-host
 templating
+template-filters
 concepts
 ```
 

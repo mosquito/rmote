@@ -1,0 +1,24 @@
+- case: immutable_snapshot_types
+  main: |
+    from typing import assert_type
+    from rmote.immutable import DeepMappingProxy, FrozenValue, freeze
+
+    values: dict[str, object] = {"items": [1, 2]}
+    snapshot = freeze(values)
+    assert_type(snapshot, DeepMappingProxy[str])
+    assert_type(snapshot["items"], FrozenValue)
+    assert_type(snapshot.updated({"other": True}), DeepMappingProxy[str])
+    assert_type(freeze(snapshot), DeepMappingProxy[str])
+    assert_type(freeze([1, 2]), tuple[FrozenValue, ...])
+    assert_type(freeze({1, 2}), frozenset[FrozenValue])
+    integer: int = 3
+    assert_type(freeze(integer), int)
+
+- case: immutable_snapshot_rejects_assignment
+  main: |
+    from rmote.immutable import freeze
+
+    snapshot = freeze({"items": [1, 2]})
+    # The snapshot is a dict subclass, so the refusal comes from the key and
+    # the value types of its __setitem__, which are Never.
+    snapshot["items"] = ()  # E: Invalid index type "str" for "DeepMappingProxy[str]"; expected type "Never"  [index] # E: Incompatible types in assignment (expression has type "tuple[()]", target has type "Never")  [assignment]

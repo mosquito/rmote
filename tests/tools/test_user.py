@@ -15,7 +15,7 @@ from rmote.protocol import Protocol
 from rmote.tools.exec import Exec
 from rmote.tools.fs import FileSystem
 from rmote.tools.user import User
-from tests.tools_cases.user_lookup import UserLookup
+from tests.support.tool_cases.user_lookup import UserLookup
 
 pytestmark = pytest.mark.timeout(60)
 

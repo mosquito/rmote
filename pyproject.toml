@@ -1,6 +1,6 @@
 [project]
 name = "rmote"
-version = "0.4.0"
+version = "0.6.0"
 description = "Run Python tools on remote hosts over SSH or subprocess streams."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,9 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 license = { file = "LICENSE" }
+
+[project.scripts]
+rmote-shell = "rmote.shell:main"
 
 [project.urls]
 Homepage = "https://github.com/mosquito/rmote"
@@ -72,6 +75,9 @@ disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
 addopts = ["--doctest-modules"]
+# No test of this suite needs thirty seconds. A test that waits longer waits
+# for something that will not happen, so it fails instead of holding the run.
+timeout = 30
 markers = ["docker: requires Docker containers"]
 testpaths = ["tests", "rmote", "docs", "README.md"]
 pythonpath = ["."]
