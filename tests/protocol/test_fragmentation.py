@@ -49,13 +49,21 @@ def encode(flags: Flags, packet_id: int, payload: bytes) -> bytes:
     return header + payload
 
 
-def make_protocol(data: bytes = b"") -> tuple[BaseProtocol, CollectingWriter]:
+class Packets(BaseProtocol):
+    """Protocol that compresses each packet, without the frame codec."""
+
+    FRAME_CODEC = False
+
+
+def make_protocol(
+    data: bytes = b"", policy: type[BaseProtocol] = BaseProtocol
+) -> tuple[BaseProtocol, CollectingWriter]:
     reader = asyncio.StreamReader()
     if data:
         reader.feed_data(data)
     reader.feed_eof()
     writer = CollectingWriter()
-    return BaseProtocol(reader, writer), writer  # type: ignore[arg-type]
+    return policy(reader, writer), writer  # type: ignore[arg-type]
 
 
 class TestSendFragmentation:
@@ -91,14 +99,24 @@ class TestSendFragmentation:
     @pytest.mark.asyncio
     async def test_logical_flags_repeat_on_every_fragment(self) -> None:
         proto, writer = make_protocol()
+        await proto.send(b"repeat " * proto.FRAGMENT_SIZE, Flags.RPC | Flags.RESPONSE, 3)
+
+        assert len(writer.frames) > 1
+        for frame in writer.frames:
+            flags, _, _ = decode(frame)
+            assert flags & Flags.RPC
+            assert flags & Flags.RESPONSE
+
+    @pytest.mark.asyncio
+    async def test_the_packet_policy_marks_every_fragment_of_one_packet(self) -> None:
+        """The packet policy compresses the payload, so each fragment says so."""
+        proto, writer = make_protocol(policy=Packets)
         # The payload has to compress, because only then does the COMPRESSED
         # flag exist to repeat. Random bytes are sent as they are.
         await proto.send(b"repeat " * proto.FRAGMENT_SIZE, Flags.RPC | Flags.RESPONSE, 3)
 
         for frame in writer.frames:
             flags, _, _ = decode(frame)
-            assert flags & Flags.RPC
-            assert flags & Flags.RESPONSE
             # Compression describes the whole packet, not one fragment.
             assert flags & Flags.COMPRESSED
 

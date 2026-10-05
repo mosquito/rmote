@@ -39,12 +39,6 @@ from types import FunctionType, MappingProxyType, ModuleType
 from typing import Any, ClassVar, NotRequired, ParamSpec, Self, TypeAlias, TypedDict, TypeVar, cast, overload
 
 
-
-
-
-
-
-
 class RPCRequest(TypedDict):
     method: str
     args: Any  # Can be tuple[Any, ...] or P.args
@@ -860,6 +854,81 @@ class Flags(enum.IntFlag):
     BATCH = 1 << 10
 
 
+class FrameCompressor:
+    """Compress frame bodies with one dictionary that serves the direction.
+
+    Every compressed body continues the deflate stream of its direction and
+    ends with a sync flush, so a body that repeats the words of an earlier one
+    carries a reference instead of the words. The dictionary therefore holds
+    the history of the connection, which is what makes a small packet cheap.
+
+    A body that cannot shrink travels raw and leaves the dictionary untouched.
+    The density of a short sample decides that, because it costs a microsecond
+    where a copy of the dictionary costs ten: the deflate state holds its whole
+    window, so a trial on a copy would cost more than the pass it tests. A body
+    that passes the sample and still does not shrink therefore travels
+    compressed and grows by the few bytes of its deflate block.
+    """
+
+    def __init__(self, level: int, sample: int, values: int) -> None:
+        self.codec = zlib.compressobj(level)
+        self.sample = sample
+        self.values = values
+
+    def dense(self, payload: bytes) -> bool:
+        """True when a short sample uses too many byte values to shrink.
+
+        This is a cheap guess that keeps random and already compressed bodies
+        out of the dictionary. It can refuse a body that would have shrunk a
+        little, which costs bytes and no time.
+        """
+        return len(set(payload[: self.sample])) > self.values
+
+    def encode(self, payload: bytes, *, allowed: bool = True) -> tuple[bytes, bool]:
+        """Return the body to write, and whether the dictionary now holds it.
+
+        A caller that passes ``allowed=False`` keeps its body out of the
+        dictionary, which is how a tool refuses compression for data it knows
+        cannot shrink.
+        """
+        if not allowed or self.dense(payload):
+            return payload, False
+        return self.codec.compress(payload) + self.codec.flush(zlib.Z_SYNC_FLUSH), True
+
+
+class FrameDecompressor:
+    """Inflate the marked bodies of one direction, in the order they arrive.
+
+    The dictionary holds every body that was marked, so the bodies must be
+    inflated in the order they were written, before the fragments of a packet
+    are joined. A raw body passes by and changes nothing.
+    """
+
+    # The four bytes that zlib writes for a sync flush. A body without them is
+    # not a complete flush, so the dictionary of the sender cannot be followed.
+    SYNC_TAIL = b"\x00\x00\xff\xff"
+
+    def __init__(self, limit: int) -> None:
+        self.codec = zlib.decompressobj()
+        self.limit = limit
+
+    def decode(self, body: bytes) -> bytes:
+        """Inflate one marked body.
+
+        Raises:
+            ValueError: The body does not end at a flush boundary, inflates
+                above the frame limit, or carries bytes after the end of the
+                stream. The direction cannot be read after any of them,
+                because the dictionary no longer matches the sender.
+        """
+        if not body.endswith(self.SYNC_TAIL):
+            raise ValueError("Compressed frame does not end at a flush boundary")
+        payload = self.codec.decompress(body, self.limit + 1)
+        if len(payload) > self.limit or self.codec.unconsumed_tail or self.codec.unused_data or self.codec.eof:
+            raise ValueError("Compressed frame is broken or above the frame limit")
+        return payload
+
+
 class BaseProtocol:
     # Five-byte magic, uint32 flags and payload length, uint64 packet id.
     MAGIC = b"RMOTE"
@@ -893,6 +962,13 @@ class BaseProtocol:
     COMPRESSION_RATIO = 0.95
     COMPRESSION_INLINE = 256 * 1024
     DECOMPRESSION_INLINE = 32 * 1024
+
+    # The frame codec compresses the body of each frame with one dictionary
+    # per direction, which the sync flush of every compressed body keeps. It
+    # replaces the policy that compressed each packet on its own: a small
+    # packet shrinks only against the history of the connection. False keeps
+    # the packet policy, which the benchmarks compare against.
+    FRAME_CODEC: ClassVar[bool] = True
 
     # A payload that cannot shrink uses most of the byte values, and counting
     # them in a short sample costs about one microsecond where a pass over
@@ -935,6 +1011,11 @@ class BaseProtocol:
         self.write_lock = asyncio.Lock()
         self._compression: ContextVar[bool] = ContextVar("rpc_compression", default=True)
 
+        # The codecs of the two directions. They are installed at the ready
+        # boundary, because the bootstrap and the boundary travel plain.
+        self.deflate: FrameCompressor | None = None
+        self.inflate: FrameDecompressor | None = None
+
         self.known_modules: set[str] = set()
         self.fragments = FragmentBuffer(self.MAX_REASSEMBLY_BYTES, self.MAX_PARTIAL_PACKETS)
         # The last lines the transport wrote to its stderr. They are the only
@@ -955,7 +1036,16 @@ class BaseProtocol:
                 flags = Flags(raw_flags)
                 if magic != self.MAGIC:
                     raise ValueError("Invalid magic number")
+                if length > self.FRAGMENT_SIZE:
+                    # Every frame of this protocol fits the limit, so a larger
+                    # one means a broken or hostile peer.
+                    raise ValueError(f"Frame of {length} bytes is above the limit of {self.FRAGMENT_SIZE}")
                 chunk = await self.reader.readexactly(length)
+                if flags & Flags.COMPRESSED and self.inflate is not None:
+                    # The dictionary follows the wire, so the body is inflated
+                    # here and not after the fragments of its packet are joined.
+                    chunk = self.inflate.decode(chunk)
+                    flags &= ~Flags.COMPRESSED
 
                 if flags & Flags.FRAGMENT:
                     self.fragments.store(packet_id, chunk)
@@ -1108,10 +1198,10 @@ class BaseProtocol:
         A streaming sender serializes the item itself, because it needs the size
         for its budget. This method takes that work and does not repeat it.
 
-        The COMPRESSED flag travels with every frame, so the sender alone
-        decides and the peer needs no agreement about the policy.
+        The frame codec compresses the body of each frame instead, so this
+        method does nothing while that codec is installed.
         """
-        if self._compression.get() and len(payload) > self.COMPRESSION_THRESHOLD:
+        if not self.FRAME_CODEC and self._compression.get() and len(payload) > self.COMPRESSION_THRESHOLD:
             packed = await self.pack(payload)
             if packed is not None:
                 payload, flags = packed, flags | Flags.COMPRESSED
@@ -1138,23 +1228,37 @@ class BaseProtocol:
             await self.send_frame(chunk, flags | Flags.FRAGMENT, packet_id)
 
     async def send_frame(self, payload: bytes, flags: Flags, packet_id: int) -> None:
-        """Write one frame as a single unit. Hold the write lock for that frame."""
+        """Write one frame as a single unit. Hold the write lock for that frame.
+
+        The frame codec compresses the body here, because the dictionary of
+        the direction must move in the order the bodies reach the wire. The
+        work stays on the loop: the lock serializes it anyway, so a worker
+        thread would only add its hand-off to the price.
+        """
         async with self.write_lock:
-            header = self.PACKET_HEADER.pack(self.MAGIC, flags, len(payload), packet_id)
             if self.writer.is_closing():
                 raise ConnectionError("Connection closed")
             try:
+                if self.deflate is not None:
+                    payload, packed = self.deflate.encode(payload, allowed=self._compression.get())
+                    if packed:
+                        flags |= Flags.COMPRESSED
+                header = self.PACKET_HEADER.pack(self.MAGIC, flags, len(payload), packet_id)
                 self.writer.write(header + payload)
                 await self.writer.drain()
             except BaseException:
-                # The peer may have received only part of the packet.
+                # The peer may have received only part of the packet, and a
+                # dictionary that moved cannot be moved back.
                 self.writer.close()
                 raise
 
     async def write_boundary(self) -> None:
+        """Write the ready boundary, then compress what follows it."""
         async with self.write_lock:
             self.writer.write(self.BOUNDARY)
             await self.writer.drain()
+            if self.FRAME_CODEC:
+                self.deflate = FrameCompressor(self.COMPRESSION_LEVEL, self.DENSITY_SAMPLE, self.DENSITY_LIMIT)
 
     @classmethod
     def start_failure(cls, said: Iterable[str], transport: Iterable[str] = ()) -> str:
@@ -1233,6 +1337,9 @@ class BaseProtocol:
         A peer that cannot start writes its reason to this stream, and its
         interpreter can write a traceback here too. Those lines go into the
         error, so the caller learns the cause instead of only the symptom.
+
+        The boundary also opens the codec of this direction: everything before
+        it travels plain, and every frame after it can carry a compressed body.
         """
         said: deque[str] = deque(maxlen=self.MAX_START_FAILURE_LINES)
         async with self.read_lock:
@@ -1245,6 +1352,8 @@ class BaseProtocol:
                     # LimitOverrunError (older). Either way, skip and keep scanning.
                     continue
                 if line == self.BOUNDARY:
+                    if self.FRAME_CODEC:
+                        self.inflate = FrameDecompressor(self.FRAGMENT_SIZE)
                     return
                 if not line:
                     raise ConnectionError(self.start_failure(said, self.transport_said))

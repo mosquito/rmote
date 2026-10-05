@@ -12,6 +12,55 @@ from rmote.tools.file_sync import Batch, Session, SyncResult
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("uploading", [True, False])
+@pytest.mark.parametrize("size", [1024, 65536, 65537, 2 * 1024 * 1024])
+@pytest.mark.parametrize("filename", ["source.bin", "source.txt"])
+async def test_file_sync_compression_policy_in_both_directions(
+    protocol, tmp_path, monkeypatch, uploading, size, filename
+):
+    source, target = tmp_path / filename, tmp_path / "target"
+    source.write_bytes(b"x" * size)
+    assert protocol.FRAME_CODEC
+    assert protocol.deflate is not None and protocol.inflate is not None
+    transfer = FileSync.upload if uploading else FileSync.download
+    # Warm tool transfer using a separate file before counting content.
+    warm, warm_target = tmp_path / "warm", tmp_path / "warm-target"
+    warm.write_bytes(b"warm")
+    await transfer(protocol, warm, warm_target)
+    wire = 0
+    stream = protocol.writer if uploading else protocol.reader
+    method = "write" if uploading else "feed_data"
+    original = getattr(stream, method)
+
+    def counted(data: bytes) -> None:
+        nonlocal wire
+        wire += len(data)
+        original(data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(stream, method, counted)
+        await transfer(protocol, source, target, block_size=65536)
+    assert (wire < size) == (size < 65536 or filename.endswith(".txt"))
+    assert target.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "name,compressed",
+    [
+        ("notes.txt", True),
+        ("data.json", True),
+        ("drawing.svg", True),
+        ("photo.png", False),
+        ("archive.tar.gz", False),
+        ("unknown", False),
+    ],
+)
+def test_file_compression_policy_uses_name_only_for_large_files(name, compressed):
+    assert FileSync._compress_file(name, 1024, 65536)
+    assert FileSync._compress_file(name, 1024 * 1024, 65536) is compressed
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("direction", ["upload", "download"])
 @pytest.mark.parametrize(
     ("original", "desired", "transferred"),
