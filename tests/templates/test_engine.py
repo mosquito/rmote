@@ -1,620 +1,378 @@
-"""Tests for Template.compile / render_template / Template protocol utilities."""
+"""Jinja-like syntax, Python semantics, source diagnostics, and remote rendering."""
 
 import pickle
 
 import pytest
 
-from rmote.protocol import Protocol, Template, Tool, render_template
+from rmote.immutable import freeze
+from rmote.templates.engine import RenderContext, Template, render_template
 
 pytestmark = pytest.mark.timeout(30)
 
-rt = render_template  # short alias for local render assertions
 
-
-# ---------------------------------------------------------------------------
-# Tier 1: Template.compile() - returns a callable render function
-# ---------------------------------------------------------------------------
-
-
-class TestCompileTemplate:
-    def test_returns_callable(self) -> None:
-        assert callable(Template.compile("Hello, world!"))
-
-    def test_simple_text(self) -> None:
-        assert Template.compile("Hello, world!")() == "Hello, world!"
-
-    def test_expression_interpolation(self) -> None:
-        fn = Template.compile("Hello, ${name}!")
-        assert fn(name="Alice") == "Hello, Alice!"
-
-    def test_no_trailing_newline(self) -> None:
-        assert not Template.compile("line1\nline2")().endswith("\n")
-
-    def test_for_loop(self) -> None:
-        fn = Template.compile("% for x in items:\n${x}\n% endfor")
-        assert fn(items=["a", "b", "c"]) == "a\nb\nc"
-
-    def test_if_else_block(self) -> None:
-        fn = Template.compile("% if x:\nyes\n% else:\nno\n% endif")
-        assert fn(x=True) == "yes"
-        assert fn(x=False) == "no"
-
-    def test_elif_block(self) -> None:
-        fn = Template.compile("% if x > 0:\npos\n% elif x < 0:\nneg\n% else:\nzero\n% endif")
-        assert fn(x=1) == "pos"
-        assert fn(x=-1) == "neg"
-        assert fn(x=0) == "zero"
-
-    def test_comment_ignored(self) -> None:
-        assert "comment" not in Template.compile("## this is a comment\nHello")()
-
-    def test_bare_statement(self) -> None:
-        assert Template.compile("% x = 42\n${x}")() == "42"
-
-    def test_result_is_string(self) -> None:
-        assert isinstance(Template.compile("hi")(), str)
-
-    def test_cached(self) -> None:
-        fn1 = Template.compile("same template")
-        fn2 = Template.compile("same template")
-        assert fn1 is fn2
-
-
-# ---------------------------------------------------------------------------
-# Tier 2: render_template() - basic syntax
-# ---------------------------------------------------------------------------
-
-
-class TestRenderTemplateBasics:
-    def test_empty_template(self) -> None:
-        assert rt("") == ""
-
-    def test_plain_text(self) -> None:
-        assert rt("Hello, world!") == "Hello, world!"
-
-    def test_multiline_plain_text(self) -> None:
-        assert rt("line1\nline2\nline3") == "line1\nline2\nline3"
-
-    def test_no_trailing_newline(self) -> None:
-        assert not rt("a\nb").endswith("\n")
-
-    def test_single_expression(self) -> None:
-        assert rt("${name}", name="Alice") == "Alice"
-
-    def test_expression_mid_line(self) -> None:
-        assert rt("Hello, ${name}!", name="Bob") == "Hello, Bob!"
-
-    def test_multiple_expressions_same_line(self) -> None:
-        assert rt("${a}+${b}=${c}", a=1, b=2, c=3) == "1+2=3"
-
-    def test_expression_only_line(self) -> None:
-        assert rt("${x}\n${y}", x="A", y="B") == "A\nB"
-
-    def test_expression_attribute(self) -> None:
-        assert rt("${s.upper()}", s="hello") == "HELLO"
-
-    def test_expression_index(self) -> None:
-        assert rt("${items[0]}", items=["first", "second"]) == "first"
-
-    def test_expression_dict_key(self) -> None:
-        assert rt("${d['k']}", d={"k": "v"}) == "v"
-
-    def test_expression_arithmetic(self) -> None:
-        assert rt("${a * b}", a=6, b=7) == "42"
-
-    def test_expression_ternary(self) -> None:
-        assert rt("${'yes' if flag else 'no'}", flag=True) == "yes"
-        assert rt("${'yes' if flag else 'no'}", flag=False) == "no"
-
-    def test_comment_not_in_output(self) -> None:
-        assert "skip" not in rt("## skip this\nHello")
-
-    def test_comment_between_text_lines(self) -> None:
-        assert rt("line1\n## comment\nline2") == "line1\nline2"
-
-    def test_bare_assignment(self) -> None:
-        assert rt("% x = 'hi'\n${x}") == "hi"
-
-    def test_bare_augmented_assignment(self) -> None:
-        assert rt("% total = 0\n% total += 10\n${total}") == "10"
-
-    def test_bare_percent_as_block_terminator(self) -> None:
-        """A line with only '%' (nothing after) decrements indent - same as endfor."""
-        assert rt("% for x in [1, 2]:\n${x}\n%") == "1\n2"
-
-
-# ---------------------------------------------------------------------------
-# Tier 3: Template syntax - escaping and special characters
-# ---------------------------------------------------------------------------
-
-
-class TestTemplateEscaping:
-    # --- %% → literal % ---------------------------------------------------
-
-    def test_double_percent_alone(self) -> None:
-        """A line starting with %% outputs a literal %."""
-        assert rt("%%") == "%"
-
-    def test_double_percent_with_text(self) -> None:
-        assert rt("%% for x in items:") == "% for x in items:"
-
-    def test_double_percent_not_control_flow(self) -> None:
-        """%%for must NOT enter a loop - it is plain text."""
-        result = rt("%% for x in range(3):\nhello\n%% endfor")
-        assert result == "% for x in range(3):\nhello\n% endfor"
-
-    def test_double_percent_preserves_if_keyword(self) -> None:
-        assert rt("%% if True:") == "% if True:"
-
-    def test_double_percent_with_expressions(self) -> None:
-        """%% lines still interpolate ${} expressions in the remainder."""
-        assert rt("%% price: ${amount}", amount=9) == "% price: 9"
-
-    def test_double_percent_mixed_with_control_flow(self) -> None:
-        tmpl = "% for x in [1, 2]:\n%% item ${x}\n% endfor"
-        assert rt(tmpl) == "% item 1\n% item 2"
-
-    def test_double_percent_leading_whitespace_preserved(self) -> None:
-        """Indentation before %% is part of the text output."""
-        assert rt("  %% note") == "  % note"
-
-    # --- \${ → literal ${ (no interpolation) --------------------------------
-
-    def test_escaped_dollar_brace_is_literal(self) -> None:
-        assert rt("price: \\${amount}", amount=99) == "price: ${amount}"
-
-    def test_escaped_dollar_brace_no_variable_needed(self) -> None:
-        """\\${ requires no variable in ctx."""
-        assert rt("\\${missing}") == "${missing}"
-
-    def test_escaped_dollar_brace_before_real_expr(self) -> None:
-        assert rt("\\${x} = ${x}", x=42) == "${x} = 42"
-
-    def test_escaped_dollar_brace_after_real_expr(self) -> None:
-        assert rt("${x} \\${x}", x=42) == "42 ${x}"
-
-    def test_escaped_dollar_brace_multiple(self) -> None:
-        assert rt("\\${a} \\${b}") == "${a} ${b}"
-
-    def test_escaped_dollar_brace_mixed_multiple(self) -> None:
-        assert rt("\\${a} + ${b} = \\${c}", b=2) == "${a} + 2 = ${c}"
-
-    # --- bare $ and { } are always literal -----------------------------------
-
-    def test_bare_dollar_is_literal(self) -> None:
-        assert rt("$100") == "$100"
-
-    def test_dollar_in_text(self) -> None:
-        assert rt("Price: $5.99") == "Price: $5.99"
-
-    def test_bare_open_brace_is_literal(self) -> None:
-        assert rt("dict: {key}") == "dict: {key}"
-
-    def test_bare_close_brace_is_literal(self) -> None:
-        assert rt("end: }") == "end: }"
-
-    def test_both_braces_literal(self) -> None:
-        assert rt("{hello}") == "{hello}"
-
-    def test_dollar_at_end_of_line(self) -> None:
-        assert rt("total: $") == "total: $"
-
-    # --- nested {} inside expressions ----------------------------------------
-
-    def test_expression_dict_literal_access(self) -> None:
-        assert rt("${ {'k': 'v'}['k'] }") == "v"
-
-    def test_expression_set_len(self) -> None:
-        assert rt("${len({1, 2, 3})}") == "3"
-
-    def test_expression_nested_dict(self) -> None:
-        assert rt("${ {'a': {'b': 1}}['a']['b'] }") == "1"
-
-    def test_expression_set_sorted(self) -> None:
-        assert rt("${sorted({3, 1, 2})[0]}") == "1"
-
-    def test_expression_dict_comprehension_len(self) -> None:
-        assert rt("${len({k: v for k, v in pairs})}", pairs=[("a", 1), ("b", 2)]) == "2"
-
-    def test_expression_set_comprehension(self) -> None:
-        assert rt("${len({x*x for x in range(4)})}") == "4"
-
-    def test_expression_fstring_with_braces(self) -> None:
-        assert rt("${f'{name}!'}", name="Alice") == "Alice!"
-
-    def test_expression_fstring_format_spec(self) -> None:
-        assert rt("${f'{val:.2f}'}", val=3.14159) == "3.14"
-
-    def test_expression_deeply_nested_dict(self) -> None:
-        data = {"a": {"b": {"c": 42}}}
-        assert rt("${d['a']['b']['c']}", d=data) == "42"
-
-    def test_expression_dict_constructor(self) -> None:
-        assert rt("${dict(x=1, y=2)['x']}") == "1"
-
-    def test_multiple_nested_exprs_on_one_line(self) -> None:
-        assert rt("${len({1,2})} and ${len({3,4,5})}") == "2 and 3"
-
-    # --- combining escapes with control flow ---------------------------------
-
-    def test_double_percent_inside_for_loop(self) -> None:
-        tmpl = "% for x in items:\n%% ${x}\n% endfor"
-        assert rt(tmpl, items=["a", "b"]) == "% a\n% b"
-
-    def test_escaped_dollar_inside_for_loop(self) -> None:
-        tmpl = "% for x in items:\n\\${x} = ${x}\n% endfor"
-        assert rt(tmpl, items=[1, 2]) == "${x} = 1\n${x} = 2"
-
-    def test_nested_braces_inside_if(self) -> None:
-        tmpl = "% if flag:\n${len({1,2,3})}\n% endif"
-        assert rt(tmpl, flag=True) == "3"
-        assert rt(tmpl, flag=False) == ""
-
-
-# ---------------------------------------------------------------------------
-# Tier 4: render_template() - for-loop cases
-# ---------------------------------------------------------------------------
-
-
-class TestRenderTemplateForLoops:
-    def test_simple_for(self) -> None:
-        assert rt("% for x in items:\n${x}\n% endfor", items=["a", "b", "c"]) == "a\nb\nc"
-
-    def test_for_with_prefix(self) -> None:
-        assert rt("% for x in items:\n- ${x}\n% endfor", items=["a", "b"]) == "- a\n- b"
-
-    def test_for_with_trailing_text(self) -> None:
-        assert rt("% for x in items:\n${x}\n% endfor\nDone.", items=["a", "b"]) == "a\nb\nDone."
-
-    def test_for_with_leading_text(self) -> None:
-        assert rt("Start\n% for x in items:\n${x}\n% endfor", items=["a", "b"]) == "Start\na\nb"
-
-    def test_for_empty_iterable(self) -> None:
-        assert rt("% for x in items:\n${x}\n% endfor", items=[]) == ""
-
-    def test_for_single_item(self) -> None:
-        assert rt("% for x in items:\n${x}\n% endfor", items=["only"]) == "only"
-
-    def test_for_with_range(self) -> None:
-        assert rt("% for i in range(3):\n${i}\n% endfor") == "0\n1\n2"
-
-    def test_for_endfor_terminator(self) -> None:
-        assert rt("% for x in [1,2]:\n${x}\n% endfor") == "1\n2"
-
-    def test_for_end_terminator(self) -> None:
-        assert rt("% for x in [1,2]:\n${x}\n% end") == "1\n2"
-
-    def test_for_multiline_body(self) -> None:
-        result = rt("% for x in items:\nfirst: ${x}\nsecond: ${x.upper()}\n% endfor", items=["a", "b"])
-        assert result == "first: a\nsecond: A\nfirst: b\nsecond: B"
-
-    def test_for_multiple_exprs_per_body_line(self) -> None:
-        assert rt("% for x in items:\n${x}: ${x.upper()}\n% endfor", items=["a", "b"]) == "a: A\nb: B"
-
-    def test_for_with_enumerate(self) -> None:
-        assert rt("% for i, v in enumerate(items):\n${i}: ${v}\n% endfor", items=["a", "b"]) == "0: a\n1: b"
-
-    def test_for_with_zip(self) -> None:
-        assert rt("% for k, v in zip(keys, vals):\n${k}=${v}\n% endfor", keys=["x", "y"], vals=[1, 2]) == "x=1\ny=2"
-
-    def test_for_break(self) -> None:
-        tmpl = "% for x in range(10):\n% if x == 3:\n% break\n% endif\n${x}\n% endfor"
-        assert rt(tmpl) == "0\n1\n2"
-
-    def test_for_continue(self) -> None:
-        tmpl = "% for x in range(5):\n% if x % 2 == 0:\n% continue\n% endif\n${x}\n% endfor"
-        assert rt(tmpl) == "1\n3"
-
-    def test_nested_for_2_levels(self) -> None:
-        tmpl = "% for i in rows:\n% for j in cols:\n${i}${j}\n% endfor\n% endfor"
-        assert rt(tmpl, rows=["A", "B"], cols=[1, 2]) == "A1\nA2\nB1\nB2"
-
-    def test_nested_for_3_levels(self) -> None:
-        tmpl = (
-            "% for a in [1,2]:\n"
-            "% for b in ['x','y']:\n"
-            "% for c in [True,False]:\n"
-            "${a}${b}${c}\n"
-            "% endfor\n"
-            "% endfor\n"
-            "% endfor"
-        )
-        lines = rt(tmpl).splitlines()
-        assert lines[0] == "1xTrue"
-        assert lines[1] == "1xFalse"
-        assert lines[2] == "1yTrue"
-        assert len(lines) == 8  # 2 * 2 * 2
-
-    def test_nested_for_with_separator_text(self) -> None:
-        tmpl = "% for i in [1,2]:\nrow ${i}\n% for j in ['a','b']:\n  ${i}${j}\n% endfor\n% endfor"
-        result = rt(tmpl)
-        assert result == "row 1\n  1a\n  1b\nrow 2\n  2a\n  2b"
-
-    def test_nested_for_accumulate(self) -> None:
-        tmpl = "% total = 0\n% for row in matrix:\n% for v in row:\n% total += v\n% endfor\n% endfor\n${total}"
-        assert rt(tmpl, matrix=[[1, 2], [3, 4]]) == "10"
-
-    def test_comment_inside_for(self) -> None:
-        assert rt("% for x in items:\n## skip\n${x}\n% endfor", items=["a", "b"]) == "a\nb"
-
-
-# ---------------------------------------------------------------------------
-# Tier 5: render_template() - conditional cases
-# ---------------------------------------------------------------------------
-
-
-class TestRenderTemplateConditionals:
-    def test_if_true(self) -> None:
-        assert rt("% if flag:\nyes\n% endif", flag=True) == "yes"
-
-    def test_if_false_empty(self) -> None:
-        assert rt("% if flag:\nyes\n% endif", flag=False) == ""
-
-    def test_if_else_true(self) -> None:
-        assert rt("% if flag:\nyes\n% else:\nno\n% endif", flag=True) == "yes"
-
-    def test_if_else_false(self) -> None:
-        assert rt("% if flag:\nyes\n% else:\nno\n% endif", flag=False) == "no"
-
-    def test_if_elif_else(self) -> None:
-        tmpl = "% if x > 0:\npos\n% elif x < 0:\nneg\n% else:\nzero\n% endif"
-        assert rt(tmpl, x=5) == "pos"
-        assert rt(tmpl, x=-3) == "neg"
-        assert rt(tmpl, x=0) == "zero"
-
-    def test_multiple_elif(self) -> None:
-        tmpl = "% if x == 1:\none\n% elif x == 2:\ntwo\n% elif x == 3:\nthree\n% else:\nother\n% endif"
-        assert rt(tmpl, x=1) == "one"
-        assert rt(tmpl, x=2) == "two"
-        assert rt(tmpl, x=3) == "three"
-        assert rt(tmpl, x=99) == "other"
-
-    def test_nested_if_inside_if(self) -> None:
-        tmpl = "% if outer:\n% if inner:\nboth\n% else:\nonly_outer\n% endif\n% else:\nnone\n% endif"
-        assert rt(tmpl, outer=True, inner=True) == "both"
-        assert rt(tmpl, outer=True, inner=False) == "only_outer"
-        assert rt(tmpl, outer=False, inner=True) == "none"
-        assert rt(tmpl, outer=False, inner=False) == "none"
-
-    def test_nested_if_3_levels(self) -> None:
-        tmpl = "% if a:\n% if b:\n% if c:\nabc\n% else:\nab\n% endif\n% else:\na\n% endif\n% else:\nnone\n% endif"
-        assert rt(tmpl, a=True, b=True, c=True) == "abc"
-        assert rt(tmpl, a=True, b=True, c=False) == "ab"
-        assert rt(tmpl, a=True, b=False, c=True) == "a"
-        assert rt(tmpl, a=False, b=True, c=True) == "none"
-
-    def test_if_with_text_before_and_after(self) -> None:
-        tmpl = "before\n% if flag:\nmiddle\n% endif\nafter"
-        assert rt(tmpl, flag=True) == "before\nmiddle\nafter"
-        assert rt(tmpl, flag=False) == "before\nafter"
-
-    def test_if_with_expression_in_condition(self) -> None:
-        tmpl = "% if len(items) > 0:\nhas items\n% else:\nempty\n% endif"
-        assert rt(tmpl, items=[1]) == "has items"
-        assert rt(tmpl, items=[]) == "empty"
-
-    def test_comment_inside_if(self) -> None:
-        tmpl = "% if flag:\n## internal\nyes\n% endif"
-        assert rt(tmpl, flag=True) == "yes"
-
-    def test_elif_no_else(self) -> None:
-        tmpl = "% if x == 1:\none\n% elif x == 2:\ntwo\n% endif"
-        assert rt(tmpl, x=1) == "one"
-        assert rt(tmpl, x=2) == "two"
-        assert rt(tmpl, x=3) == ""
-
-
-# ---------------------------------------------------------------------------
-# Tier 6: render_template() - mixed control flow
-# ---------------------------------------------------------------------------
-
-
-class TestRenderTemplateMixed:
-    def test_if_inside_for(self) -> None:
-        tmpl = "% for x in items:\n% if x > 0:\n+${x}\n% else:\n${x}\n% endif\n% endfor"
-        assert rt(tmpl, items=[1, -2, 3]) == "+1\n-2\n+3"
-
-    def test_for_inside_if(self) -> None:
-        tmpl = "% if show:\n% for x in items:\n${x}\n% endfor\n% endif"
-        assert rt(tmpl, show=True, items=["a", "b"]) == "a\nb"
-        assert rt(tmpl, show=False, items=["a", "b"]) == ""
-
-    def test_for_inside_else(self) -> None:
-        tmpl = "% if empty:\nnone\n% else:\n% for x in items:\n${x}\n% endfor\n% endif"
-        assert rt(tmpl, empty=False, items=["a", "b"]) == "a\nb"
-        assert rt(tmpl, empty=True, items=[]) == "none"
-
-    def test_nested_for_with_if(self) -> None:
-        tmpl = "% for row in matrix:\n% for val in row:\n% if val > 0:\n+\n% else:\n-\n% endif\n% endfor\n|\n% endfor"
-        result = rt(tmpl, matrix=[[1, -1], [-1, 1]])
-        lines = result.splitlines()
-        assert lines[0] == "+"
-        assert lines[1] == "-"
-        assert lines[2] == "|"
-
-    def test_if_inside_nested_for(self) -> None:
-        tmpl = "% for i in [1,2]:\n% for j in [1,2]:\n% if i == j:\n${i}\n% endif\n% endfor\n% endfor"
-        assert rt(tmpl) == "1\n2"
-
-    def test_assignment_before_loop(self) -> None:
-        tmpl = "% total = 0\n% for x in items:\n% total += x\n% endfor\n${total}"
-        assert rt(tmpl, items=[1, 2, 3, 4]) == "10"
-
-    def test_assignment_inside_loop(self) -> None:
-        tmpl = "% for x in items:\n% y = x * 2\n${y}\n% endfor"
-        assert rt(tmpl, items=[1, 2, 3]) == "2\n4\n6"
-
-    def test_assignment_accumulate_string(self) -> None:
-        tmpl = "% out = ''\n% for x in items:\n% out += x\n% endfor\n${out}"
-        assert rt(tmpl, items=["a", "b", "c"]) == "abc"
-
-    def test_listcomp_then_loop(self) -> None:
-        tmpl = "% squares = [x**2 for x in range(4)]\n% for v in squares:\n${v}\n% endfor"
-        assert rt(tmpl) == "0\n1\n4\n9"
-
-    def test_multiline_header_footer(self) -> None:
-        tmpl = "=== Report ===\n% for item in items:\n  * ${item}\n% endfor\n=== End ==="
-        result = rt(tmpl, items=["foo", "bar"])
-        assert result.startswith("=== Report ===\n")
-        assert result.endswith("\n=== End ===")
-        assert "  * foo" in result
-
-    def test_indentation_preserved_in_text(self) -> None:
-        tmpl = "% for x in items:\n    ${x}\n% endfor"
-        assert rt(tmpl, items=["a"]) == "    a"
-
-    def test_break_in_nested_for(self) -> None:
-        tmpl = "% for i in [1,2,3]:\n% for j in [1,2,3]:\n% if j == 2:\n% break\n% endif\n${i}${j}\n% endfor\n% endfor"
-        assert rt(tmpl) == "11\n21\n31"
-
-    def test_for_if_elif_mixed(self) -> None:
-        tmpl = "% for x in items:\n% if x < 0:\nneg\n% elif x == 0:\nzero\n% else:\npos\n% endif\n% endfor"
-        assert rt(tmpl, items=[-1, 0, 1]) == "neg\nzero\npos"
-
-
-# ---------------------------------------------------------------------------
-# Tier 7: Template - picklability and reuse
-# ---------------------------------------------------------------------------
-
-
-class TestTemplate:
-    def test_render_matches_render_template(self) -> None:
-        tmpl = "Hello, ${name}!"
-        assert Template(tmpl).render(name="Alice") == rt(tmpl, name="Alice")
-
-    def test_render_loop(self) -> None:
-        assert Template("% for x in items:\n${x}\n% endfor").render(items=["a", "b"]) == "a\nb"
-
-    def test_reuse_different_ctx(self) -> None:
-        ct = Template("${n}")
-        assert ct.render(n=1) == "1"
-        assert ct.render(n=2) == "2"
-        assert ct.render(n="three") == "three"
-
-    def test_pickle_simple(self) -> None:
-        ct = Template("Hello, ${name}!")
-        assert pickle.loads(pickle.dumps(ct)).render(name="Pickle") == "Hello, Pickle!"
-
-    def test_pickle_loop(self) -> None:
-        ct = Template("% for x in items:\n${x}\n% endfor")
-        assert pickle.loads(pickle.dumps(ct)).render(items=["a", "b"]) == "a\nb"
-
-    def test_pickle_nested_for(self) -> None:
-        ct = Template("% for i in rows:\n% for j in cols:\n${i}${j}\n% endfor\n% endfor")
-        assert pickle.loads(pickle.dumps(ct)).render(rows=["A", "B"], cols=[1, 2]) == "A1\nA2\nB1\nB2"
-
-    def test_pickle_if_else(self) -> None:
-        ct = Template("% if flag:\nyes\n% else:\nno\n% endif")
-        restored: Template = pickle.loads(pickle.dumps(ct))
-        assert restored.render(flag=True) == "yes"
-        assert restored.render(flag=False) == "no"
-
-    def test_pickle_nested_if_in_for(self) -> None:
-        ct = Template("% for x in items:\n% if x > 0:\n+${x}\n% else:\n${x}\n% endif\n% endfor")
-        assert pickle.loads(pickle.dumps(ct)).render(items=[1, -2, 3]) == "+1\n-2\n+3"
-
-    def test_pickle_all_protocols(self) -> None:
-        ct = Template("${v}")
-        for proto in range(pickle.HIGHEST_PROTOCOL + 1):
-            assert pickle.loads(pickle.dumps(ct, protocol=proto)).render(v=proto) == str(proto)
-
-    def test_repr(self) -> None:
-        assert "Template" in repr(Template("hi"))
-
-
-# ---------------------------------------------------------------------------
-# Tier 8: Integration - inline tools using template utilities over subprocess
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_inline_render_simple(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(tmpl: str, **ctx: object) -> str:
-            return render_template(tmpl, **ctx)
-
-    assert await protocol(T.run, "Hello, ${name}!", name="Remote") == "Hello, Remote!"
-
-
-@pytest.mark.asyncio
-async def test_inline_render_for_loop(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(items: list[str]) -> str:
-            return render_template("% for x in items:\n${x}\n% endfor", items=items)
-
-    assert await protocol(T.run, ["a", "b", "c"]) == "a\nb\nc"
-
-
-@pytest.mark.asyncio
-async def test_inline_render_nested_for(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(rows: list[str], cols: list[int]) -> str:
-            return render_template(
-                "% for r in rows:\n% for c in cols:\n${r}${c}\n% endfor\n% endfor",
-                rows=rows,
-                cols=cols,
-            )
-
-    assert await protocol(T.run, ["A", "B"], [1, 2]) == "A1\nA2\nB1\nB2"
-
-
-@pytest.mark.asyncio
-async def test_inline_render_if_else(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(flag: bool) -> str:
-            return render_template("% if flag:\nyes\n% else:\nno\n% endif", flag=flag)
-
-    assert await protocol(T.run, True) == "yes"
-    assert await protocol(T.run, False) == "no"
-
-
-@pytest.mark.asyncio
-async def test_inline_render_if_in_for(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(items: list[int]) -> str:
-            return render_template(
-                "% for x in items:\n% if x > 0:\n+${x}\n% else:\n${x}\n% endif\n% endfor",
-                items=items,
-            )
-
-    assert await protocol(T.run, [1, -2, 3]) == "+1\n-2\n+3"
-
-
-@pytest.mark.asyncio
-async def test_inline_compiled_template_as_argument(protocol: Protocol) -> None:
-    """Template compiled locally, pickled, rendered on the remote."""
-
-    class T(Tool):
-        @staticmethod
-        def run(tmpl: Template, **ctx: object) -> str:
-            return tmpl.render(**ctx)
-
-    ct = Template("Hello, ${name}! Count: ${count}")
-    assert await protocol(T.run, ct, name="Remote", count=42) == "Hello, Remote! Count: 42"
-
-
-@pytest.mark.asyncio
-async def test_inline_compiled_template_nested_loop(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(tmpl: Template, rows: list[str], cols: list[int]) -> str:
-            return tmpl.render(rows=rows, cols=cols)
-
-    ct = Template("% for r in rows:\n% for c in cols:\n${r}${c}\n% endfor\n% endfor")
-    assert await protocol(T.run, ct, ["A", "B"], [1, 2]) == "A1\nA2\nB1\nB2"
-
-
-@pytest.mark.asyncio
-async def test_inline_compiled_template_nested_if_in_for(protocol: Protocol) -> None:
-    class T(Tool):
-        @staticmethod
-        def run(tmpl: Template, items: list[int]) -> str:
-            return tmpl.render(items=items)
-
-    ct = Template("% for x in items:\n% if x > 0:\n+${x}\n% else:\n${x}\n% endif\n% endfor")
-    assert await protocol(T.run, ct, [1, -2, 3]) == "+1\n-2\n+3"
+@pytest.mark.parametrize(
+    "source",
+    [
+        "",
+        "Hello, world!",
+        "a\nb",
+        "a\n",
+        "\n\n",
+        "a\r\nb\r\n",
+        "a\rb",
+        " \t text \t ",
+        "$100",
+        "{key}",
+        "${missing}",
+        "% if missing:\ntext\n% endif",
+        "%% literal",
+        "## literal",
+        "end: }",
+        "}} %} #}",
+    ],
+)
+def test_literal_text_is_preserved(source):
+    assert render_template(source) == source
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        ("name", "Alice"),
+        ("name|upper", "ALICE"),
+        ("items[0]", "1"),
+        ("d['k']", "v"),
+        ("6 * 7", "42"),
+        ("'yes' if items else 'no'", "yes"),
+        ("{1, 2, 3}|length", "3"),
+        ("{'a': {'b': 1}}['a']['b']", "1"),
+        ("({3, 1, 2}|sort)[0]", "1"),
+        ("items|length", "3"),
+        ("[0,1,4,9]|length", "4"),
+        ("[items[0]*2, items[1]*2, items[2]*2]", "[2, 4, 6]"),
+        ("{'x':1,'y':2}['x']", "1"),
+        ("name + '!'", "Alice!"),
+        ("'%.2f' % 3.14159", "3.14"),
+        ("(42|string) + '}'", "42}"),
+        ("'%}'", "%}"),
+        ("'}}'", "}}"),
+        ("'{# ignored? #}'", "{# ignored? #}"),
+        ("'{% if missing %}'", "{% if missing %}"),
+        ("'{{ missing }}'", "{{ missing }}"),
+        ("10 + 1", "11"),
+        ("None", "None"),
+        ("True", "True"),
+        ("\n  1 +\n  2\n", "3"),
+        ("'''one\ntwo'''", "one\ntwo"),
+    ],
+)
+def test_restricted_expressions(expression, expected):
+    source = "before {{ " + expression + " }} after {{ 2 }}"
+    assert render_template(source, name="Alice", items=[1, 2, 3], d={"k": "v"}) == f"before {expected} after 2"
+
+
+def test_missing_values_are_errors():
+    with pytest.raises(NameError):
+        render_template("{{ missing }}")
+    assert render_template("{{ data.key }}", data={"key": 1}) == "1"
+
+
+@pytest.mark.parametrize("ssl, expected", [(True, "listen 443 ssl;"), (False, "listen 443;")])
+def test_conditional_suffix(ssl, expected):
+    assert render_template("listen {{ port }}{% if ssl %} ssl{% endif %};", port=443, ssl=ssl) == expected
+
+
+@pytest.mark.parametrize("value, expected", [(1, "positive"), (0, "zero"), (-1, "negative")])
+def test_if_elif_else(value, expected):
+    source = "{% if value > 0: %}positive{% elif value == 0 %}zero{% else: %}negative{% endif %}"
+    assert render_template(source, value=value) == expected
+
+
+@pytest.mark.parametrize("value, expected", [(1, "one"), (2, "two"), (3, "")])
+def test_elif_without_else(value, expected):
+    assert render_template("{% if value == 1 %}one{% elif value == 2 %}two{% endif %}", value=value) == expected
+
+
+@pytest.mark.parametrize(
+    "outer, inner, expected",
+    [(True, True, "both"), (True, False, "outer"), (False, True, "none"), (False, False, "none")],
+)
+def test_nested_conditions(outer, inner, expected):
+    source = "{% if outer %}{% if inner %}both{% else %}outer{% endif %}{% else %}none{% endif %}"
+    assert render_template(source, outer=outer, inner=inner) == expected
+
+
+@pytest.mark.parametrize("items, expected", [([], "hosts=;"), (["a"], "hosts=[a];"), (["a", "b"], "hosts=[a][b];")])
+@pytest.mark.parametrize("end", ["endfor", "end"])
+def test_for_loop(items, expected, end):
+    source = "hosts={% for host in items %}[{{ host }}]{% " + end + " %};"
+    assert render_template(source, items=items) == expected
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("{% for n in [0,1,2] %}{{ n }}{% endfor %}", "012"),
+        ("{% for i, v in [(0, 'a'), (1, 'b')] %}{{ i }}:{{ v }};{% endfor %}", "0:a;1:b;"),
+        ("{% for k, v in [('a',1), ('b',2)] %}{{ k }}={{ v }};{% endfor %}", "a=1;b=2;"),
+        (
+            "{% for row in [[1, -1], [], [2, 3]] %}[{% for n in row %}{% if n > 0 %}{{ n }}{% else %}x{% endif %}{% endfor %}]{% endfor %}",
+            "[1x][][23]",
+        ),
+        (
+            "{% for a in [1,2] %}{% for b in ['x','y'] %}{% for c in ['+','-'] %}{{ a }}{{ b }}{{ c }};{% endfor %}{% endfor %}{% endfor %}",
+            "1x+;1x-;1y+;1y-;2x+;2x-;2y+;2y-;",
+        ),
+        ("{% if True %}{% for x in [1,2] %}{{ x }}{% endfor %}{% endif %}", "12"),
+        ("{% if False %}{% for x in [1,2] %}{{ x }}{% endfor %}{% endif %}", ""),
+        (
+            "{% for n in [0,1,2,3,4] %}{% if n == 1 %}{% continue %}{% endif %}{{ n }}{% if n == 2 %}{% break %}{% endif %}{% endfor %}",
+            "02",
+        ),
+        ("{% for n in [] %}{{ n }}{% else %}empty{% endfor %}", "empty"),
+        ("{% for n in [1] %}{{ n }}{% else %}!{% endfor %}", "1!"),
+        ("{% for n in [1] %}{% break %}{% else %}empty{% endfor %}", ""),
+        (
+            "{% set total = 0 %}{% for row in [[1,2], [3,4]] %}{% for n in row %}{% set total = total + n %}{% endfor %}{% endfor %}{{ total }}",
+            "10",
+        ),
+        ("{% set a, b = 1, 2 %}{{ a + b }}", "3"),
+        ("{% if True %}{% endif %}", ""),
+        ("{% if False %}{% else %}yes{% endif %}", "yes"),
+        ("{% for n in [1, 2] %}{% endfor %}", ""),
+        ("{% if '%}' == '%}' %}yes{% endif %}", "yes"),
+        ('{% if "%}" == "%}" %}yes{% endif %}', "yes"),
+        ("{% if '''%}''' %}yes{% endif %}", "yes"),
+        ("{% if '\\'%}' %}yes{% endif %}", "yes"),
+        ("{% for n in {'%}': '{{', '{%': '}'} %}{{ n }}{% endfor %}", "%}{%"),
+        ("{% if (5 % 2) == {'k': 1}['k'] %}yes{% endif %}", "yes"),
+        ("{% for n in (\n  1,\n  2,\n) %}{{ n }}{% endfor %}", "12"),
+        ("{% if (\n  True\n) %}yes{% endif %}", "yes"),
+        ("{% set text = '''one\ntwo''' %}{{ text }}", "one\ntwo"),
+        ("{% if True %}{{ '''one\ntwo''' }}{% endif %}", "one\ntwo"),
+    ],
+)
+def test_control_flow(source, expected):
+    assert render_template(source) == expected
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("a{# ignored #}b", "ab"),
+        ("a{# ignored\n{{bad}} {%bad%} #}b", "ab"),
+        ("{# comment #}\ntext\n", "\ntext\n"),
+        ("{##}", ""),
+        (r"\{{ missing }}", "{{ missing }}"),
+        (r"\{% if missing %}", "{% if missing %}"),
+        (r"\{# literal #}", "{# literal #}"),
+        (r"\{{x}} = {{x}}", "{{x}} = 42"),
+        ("{{ '{{' }}{{ '{%' }}{{ '{#' }}", "{{{%{#"),
+        ("  {% if True %} x {% endif %}  ", "   x   "),
+        ("a\n{% if False %}hidden{% endif %}\nb", "a\n\nb"),
+        ("a{% if False %}hidden\n{% endif %}b", "ab"),
+        ("a{% for n in [1, 2] %}{{ n }}\nb{% endfor %}c", "a1\nb2\nbc"),
+        ("{% for n in [1, 2] %}\n{{ n }}\n{% endfor %}", "\n1\n\n2\n"),
+        ("a \n\t{%- if True %} b {% endif -%}\n\t c", "a b c"),
+        ("a \n {{- x -}} \n b", "a42b"),
+        ("a \n {#- comment -#} \n b", "ab"),
+        ("a {#-#} b", "a b"),
+        ("a {#--#} b", "ab"),
+        ("{% for n in [1,2] -%}\n  {{ n }}\n{% endfor -%}\n", "1\n2\n"),
+        ("{% for n in [1,2] %}{{ n }} \n{%- endfor %}", "12"),
+        ("a \t{% if False -%}\nignored{% endif %} b", "a \t b"),
+        ("{{ ' x ' }}{%- if True %}!{% endif %}", " x !"),
+        ("a {% if True %} {{ ' y ' -}} {% endif %} z", "a   y  z"),
+        ("a\r\n {%- if True -%}\r\n b\r\n {%- endif -%}\r\n c", "abc"),
+        ("{{ -2 }}", "-2"),
+        ("{{2-1}}", "1"),
+        ("{{ {'k': 1}}}", "{'k': 1}"),
+    ],
+)
+def test_comments_escapes_and_whitespace(source, expected):
+    assert render_template(source, x=42) == expected
+
+
+@pytest.mark.parametrize(
+    "source, message, marker",
+    [
+        ("text\n  {% if True %}yes{% endfor %}", "Expected endif", "{% endfor"),
+        ("{% endif %}", "Unexpected block terminator", "{% endif"),
+        ("{% else %}", "Unexpected else", "{% else"),
+        ("text\n  {% if True %}yes", "Unclosed if", "{% if"),
+        ("{% if True %}yes{% else %}no{% elif True %}bad{% endif %}", "Unexpected elif after else", "{% elif"),
+        ("{% for n in [] %}{% elif True %}bad{% endfor %}", "Unexpected elif", "{% elif"),
+        ("{% if True %}{% endif extra %}", "Unexpected text", "{% endif"),
+        ("hello {% %}", "Empty template command", "{%"),
+        ("hello {{ }}", "Empty template expression", "{{"),
+        ("hello {% if True", "unclosed template command", "{%"),
+        ("hello {{value", "unclosed template expression", "{{"),
+        ("text\n{# comment", "unclosed template comment", "{#"),
+        ("text\n  {% if + %}bad{% endif %}", "Unexpected end", "{% if"),
+        ("text\n  {{ 1 + }}", "Unexpected end", "{{"),
+        ("first\n{{\n  1 +\n}}", "Unexpected end", "{{"),
+        ("{% set n = %}", "Unexpected end", "{% set"),
+        ("{% set n %}", "Unexpected", "{% set"),
+        ("{% set %}", "Unexpected", "{% set"),
+        ("{% set a = 1; b = 2 %}", "Unexpected", "{% set"),
+        ("{% break %}", "outside loop", "{% break"),
+        ("{% if True %}{% finally %}{% endif %}", "Unsupported template command", "{% finally"),
+        ("{% if True %}{% else %}{% else %}{% endif %}", "Unexpected else after else", "{% else %}{% endif"),
+        ("\n{#- ignore -#}\n\n   {% if + %}{% endif %}", "Unexpected end", "{% if"),
+        ('{{ "unterminated }}', "unterminated|unclosed", "{{"),
+    ],
+)
+def test_source_diagnostics(source, message, marker):
+    with pytest.raises(SyntaxError, match=f"(?i){message}") as caught:
+        Template(source)
+    position = source.index(marker)
+    error = caught.value
+    assert error.filename == "<template>"
+    assert error.lineno == source.count("\n", 0, position) + 1
+    assert error.offset == position - source.rfind("\n", 0, position)
+    assert error.text == source.splitlines()[error.lineno - 1]
+
+
+def test_compile_cache_and_fresh_context():
+    source = "{% set total = 0 %}{% for n in items %}{% set total = total + n %}{% endfor %}{{ total }}"
+    fn = Template.compile(source)
+    assert callable(fn)
+    assert fn is Template.compile(source)
+    assert fn(items=[1, 2]) == "3"
+    assert fn(items=[]) == "0"
+    template = Template(source)
+    assert template.render(items=[4, 5]) == "9"
+    assert template.render(items=[]) == "0"
+    assert "Template" in repr(template)
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("{{ value }}", "42"),
+        ("{% for n in [1,2] %}{{ n }}{% if n == 2 %}!{% endif %}{% endfor %}\n", "12!\n"),
+        ("  {#- remove -#} {{- value -}} \n", "42"),
+    ],
+)
+def test_pickle(source, expected, protocol):
+    template = pickle.loads(pickle.dumps(Template(source), protocol=protocol))
+    assert template.render(value=42) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ name.upper() }}",
+        "{{ len({1, 2, 3}) }}",
+        "{{ sorted({3, 1, 2})[0] }}",
+        "{{ len({x: x * x for x in items}) }}",
+        "{{ len({x*x for x in range(4)}) }}",
+        "{{ [x * 2 for x in items] }}",
+        "{{ dict(x=1, y=2)['x'] }}",
+        "{{ f'{name}!' }}",
+        "{{ f'{3.14159:.2f}' }}",
+        "{{ f'{42}}}' }}",
+        "{{ (10).__or__(3) }}",
+        "{% set n = 2 %}{% while n %}{{ n }}{% set n -= 1 %}{% endwhile %}",
+        "{% set n = 0 %}{% while n %}bad{% else %}empty{% endwhile %}",
+        "{% set n: int = 42 %}{{ n }}",
+        "{% set squares = [x**2 for x in range(4)] %}{% for x in squares %}{{ x }};{% endfor %}",
+        "{% try %}{{ 1 / 0 }}{% except ZeroDivisionError %}zero{% finally %}!{% endtry %}",
+        "{% try %}ok{% except ValueError %}bad{% else %}!{% finally %}?{% endtry %}",
+        "{% with __import__('contextlib').nullcontext(42) as n %}{{ n }}{% endwith %}",
+        "{% def twice(n) %}{% return n * 2 %}{% enddef %}{{ twice(21) }}",
+        "{% class Value %}{% set n = 42 %}{% endclass %}{{ Value.n }}",
+        "{% if f'{5 % 2}%}}' == '1%}' %}yes{% endif %}",
+    ],
+)
+def test_python_execution_syntax_is_rejected(source):
+    with pytest.raises(SyntaxError):
+        Template(source)
+
+
+def test_a_value_the_template_never_reads_is_not_checked():
+    """A check costs as much as the data is deep, so it waits for the read."""
+
+    class Trap:
+        def __getattr__(self, name):
+            raise AssertionError("the template touched an unread value")
+
+    template = Template("{{ used }}")
+    assert template.render(used="ok", unused=Trap(), also=[Trap()]) == "ok"
+    with pytest.raises(TypeError, match="plain data"):
+        Template("{{ unused }}").render(unused=Trap())
+
+
+def test_a_value_is_checked_once_however_often_it_is_read(monkeypatch):
+    checked = []
+    original = RenderContext.validate
+
+    def counted(value, seen):
+        checked.append(value)
+        return original(value, seen)
+
+    monkeypatch.setattr(RenderContext, "validate", staticmethod(counted))
+    assert (
+        Template("{% for item in items %}{{ item }}{% endfor %}{{ items|length }}").render(items=[1, 2, 3]) == "1233"
+    )
+    assert checked == [[1, 2, 3]]
+
+
+def test_a_frozen_snapshot_is_accepted_without_a_walk(monkeypatch):
+    checked = []
+    original = RenderContext.validate
+
+    def counted(value, seen):
+        checked.append(value)
+        return original(value, seen)
+
+    snapshot = freeze({"hosts": [{"name": "one", "port": 1}, {"name": "two", "port": 2}], "hostname": "controller"})
+    template = Template("{% for host in hosts %}{{ host.name }}:{{ host.port }} {% endfor %}on {{ hostname }}")
+    with monkeypatch.context() as patch:
+        patch.setattr(RenderContext, "validate", staticmethod(counted))
+        assert template.render(snapshot) == "one:1 two:2 on controller"
+        assert checked == []
+    # The same snapshot renders like the plain data it was made from.
+    assert template.render(hosts=[{"name": "one", "port": 1}, {"name": "two", "port": 2}], hostname="controller") == (
+        template.render(snapshot)
+    )
+
+
+def test_a_frozen_snapshot_accepts_extra_keyword_values():
+    snapshot = freeze({"hosts": [{"name": "one"}]})
+    template = Template("{% for host in hosts %}{{ host.name }}{% endfor %}@{{ hostname }}")
+    assert template.render(snapshot, hostname="controller") == "one@controller"
+
+    class Trap:
+        pass
+
+    # A keyword value added beside a snapshot is still checked when it is read.
+    with pytest.raises(TypeError, match="plain data"):
+        template.render(snapshot, hostname=Trap())
+
+
+def test_a_plain_mapping_passed_whole_is_still_checked():
+    class Trap:
+        pass
+
+    assert Template("{{ a }}").render({"a": 1}) == "1"
+    with pytest.raises(TypeError, match="plain data"):
+        Template("{{ a }}").render({"a": Trap()})
+
+
+def test_a_frozen_branch_inside_a_plain_context_is_accepted():
+    snapshot = freeze({"name": "one", "port": 1})
+    assert Template("{{ host.name }}:{{ host.port }}").render(host=snapshot) == "one:1"
+    assert Template("{{ hosts|length }}").render(hosts=[snapshot, snapshot]) == "2"
+
+
+def test_a_field_of_a_value_that_is_not_a_mapping_is_an_attribute():
+    """The subscript chooses the way: a value that refuses it gives an attribute."""
+    assert Template("{{ number.real }}:{{ number.denominator }}").render(number=7) == "7:1"
+    assert Template("{{ host.name }}").render(host={"name": "one"}) == "one"
+    assert Template("{{ host.name }}").render(host=freeze({"name": "one"})) == "one"
+    with pytest.raises(AttributeError):
+        Template("{{ number.missing }}").render(number=7)
+    with pytest.raises(KeyError):
+        Template("{{ host.missing }}").render(host={"a": 1})
