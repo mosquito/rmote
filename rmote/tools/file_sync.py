@@ -95,7 +95,9 @@ class Session:
     a time. A receiver opens a temporary file beside the destination at the
     first block that differs, and not at all while every block matches. Always
     call :meth:`close` in a ``finally`` block, including after successful
-    completion. Calls on one session must be sequential.
+    completion. Calls on one session must be sequential. The ``lock``
+    attribute keeps that order for a caller that steps the session from more
+    than one thread; separate sessions never wait for each other.
 
     Args:
         path: Source or destination path in this process's filesystem.
@@ -133,6 +135,9 @@ class Session:
         self.path = Path(path).absolute()
         self.receiving = receiving
         self.block_size = block_size
+        # One lock for one session, so a step of another session runs at the
+        # same time. A step reads, hashes and writes up to WINDOW bytes.
+        self.lock = threading.RLock()
         self.old: BinaryIO | None = None
         self.output: BinaryIO | None = None
         self.temp: Path | None = None
@@ -542,6 +547,9 @@ class FileSync(Tool):
     """
 
     _sessions: ClassVar[dict[str, Session]] = {}
+    # This lock protects the registry only: a lookup, an insertion or a
+    # removal. File work runs under the lock of the session instead, so
+    # transfers of different files do not wait for each other.
     _lock: ClassVar[threading.RLock] = threading.RLock()
 
     @staticmethod
@@ -711,23 +719,32 @@ class FileSync(Tool):
 
     @classmethod
     def _open(cls, token: str, path: str, receiving: bool, block_size: int, size: int = 0) -> int:
-        with cls._lock:
-            if token in cls._sessions:
-                raise ValueError("Session already exists")
-            session = Session(path, receiving, block_size, size)
-            cls._sessions[token] = session
-            return session.size
+        # The constructor opens a file, so it runs outside the registry lock.
+        session = Session(path, receiving, block_size, size)
+        try:
+            with cls._lock:
+                if token in cls._sessions:
+                    raise ValueError("Session already exists")
+                cls._sessions[token] = session
+        except BaseException:
+            session.close()
+            raise
+        return session.size
 
     @classmethod
     def _step(cls, token: str, message: Any = None) -> Any:
         with cls._lock:
             session = cls._sessions[token]
+        # No thread waits for a session lock while it holds the registry lock,
+        # so this order cannot deadlock.
+        with session.lock:
             result = session.step(message)
             # A final message ends this side of the exchange: the result of a
             # receiver, or the batch of a sender that carries the final hash.
             # The session closes itself, so the caller needs no call for it.
             if isinstance(result, SyncResult) or (isinstance(result, Batch) and result.digest is not None):
-                del cls._sessions[token]
+                with cls._lock:
+                    cls._sessions.pop(token, None)
                 session.close()
             return result
 
@@ -735,7 +752,9 @@ class FileSync(Tool):
     def _close(cls, token: str) -> None:
         with cls._lock:
             session = cls._sessions.pop(token, None)
-            if session is not None:
+        if session is not None:
+            # A step of this session can still run; wait for it to finish.
+            with session.lock:
                 session.close()
 
 

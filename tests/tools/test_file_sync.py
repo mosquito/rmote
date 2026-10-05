@@ -3,6 +3,9 @@
 import asyncio
 import hashlib
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -543,3 +546,72 @@ async def test_a_destination_that_matches_needs_fewer_calls(protocol, tmp_path, 
     assert not (await FileSync.upload(counted, source, target, block_size=1024)).changed
     # Every block matches, so one batch of signatures covers the whole file.
     assert len(calls) <= 5
+
+
+def test_steps_of_different_sessions_run_at_the_same_time(tmp_path, monkeypatch):
+    """A step of one session must not stop a step of another session."""
+    tokens = ("first", "second")
+    for token in tokens:
+        source = tmp_path / token
+        source.write_bytes(b"content")
+        FileSync._open(token, str(source), False, 4)
+    # A barrier that no step passes alone: a shared lock would break it.
+    barrier = threading.Barrier(len(tokens), timeout=5)
+
+    def waiting(self, message=None):
+        barrier.wait()
+        return Batch([], [])
+
+    monkeypatch.setattr(Session, "step", waiting)
+    try:
+        with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
+            steps = [pool.submit(FileSync._step, token) for token in tokens]
+            for step in steps:
+                assert step.result(timeout=5) == Batch([], [])
+    finally:
+        for token in tokens:
+            FileSync._close(token)
+    assert not FileSync._sessions
+
+
+def test_steps_of_one_session_do_not_overlap(tmp_path, monkeypatch):
+    """The lock of a session keeps the order of its own steps."""
+    source = tmp_path / "source"
+    source.write_bytes(b"content")
+    FileSync._open("token", str(source), False, 4)
+    active = 0
+    overlapped = False
+
+    def counting(self, message=None):
+        nonlocal active, overlapped
+        active += 1
+        overlapped |= active > 1
+        time.sleep(0.05)
+        active -= 1
+        return Batch([], [])
+
+    monkeypatch.setattr(Session, "step", counting)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for step in [pool.submit(FileSync._step, "token") for _ in range(4)]:
+                step.result(timeout=5)
+    finally:
+        FileSync._close("token")
+    assert not overlapped
+    assert not FileSync._sessions
+
+
+def test_a_taken_token_is_refused_and_keeps_the_first_session(tmp_path):
+    """A duplicate token must not replace or close the open session."""
+    source = tmp_path / "source"
+    source.write_bytes(b"content")
+    assert FileSync._open("token", str(source), False, 4) == 7
+    try:
+        with pytest.raises(ValueError, match="Session already exists"):
+            FileSync._open("token", str(source), False, 4)
+        assert list(FileSync._sessions) == ["token"]
+        assert FileSync._step("token").signatures
+    finally:
+        FileSync._close("token")
+    assert not FileSync._sessions
+    assert not list(tmp_path.glob(".*.rmote-*"))
