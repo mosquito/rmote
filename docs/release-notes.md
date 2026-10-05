@@ -1,5 +1,104 @@
 # Release notes
 
+## 0.6.0
+
+### New features
+
+- [Streaming RPC and module tools](writing-tools.md): typed async iterators,
+  bounded buffering, cancellation and lazy transfer of Python modules/packages.
+- [Interactive shell](shell.md): `rmote-shell` and `Vty` support POSIX terminals
+  and pipes over SSH, Docker or other command transports.
+- [Host facts](api/tools/facts.md): typed collectors for system, network,
+  packages and services, with local or remote collection.
+- [Result caching](api/cache.md): explicit freshness checks and JSON/SQLite
+  persistence; [immutable snapshots](api/immutable.md) are available separately.
+- [Portable templates](templating.md): Jinja-like syntax and compiled programs
+  with transferable filters, without a Jinja2 dependency on the remote host.
+- [Transport](api/protocol.md): interleaved frames, connection-history zlib
+  compression and per-call `uncompressed(...)`. File transfers batch work;
+  remote logs are batched and delivered outside the RPC event loop.
+
+### Compatibility changes
+
+- Rewrite old template syntax using `{{ ... }}` and `{% ... %}`. Import
+  `Template` and `render_template` from `rmote.templates`, not `rmote.protocol`.
+  Replace the old `rmote.tools.Template` tool with `RenderTemplate`;
+  `render` accepts text or a compiled template and replaces `render_compiled`.
+  `rmote.tools.template.Template` now refers to the engine, not the tool.
+- Import `process` from `rmote.process`; `async_process` is available there too.
+  Direct local calls to command-running methods of `Exec`, `Apt`, `Pacman`,
+  `Service` and `User` now require `await`. RPC call syntax is unchanged.
+- Unsupported platforms or missing tool prerequisites now raise
+  `NotImplementedError`; catching `OSError` alone no longer covers these cases.
+- `FileSync` and `Rsync` default to 4 MiB blocks, up from 1 MiB.
+  `Connection.from_local`, `Connection.from_ssh` and `Protocol.from_ssh` now
+  capture `stderr` through `PIPE` instead of discarding it with `DEVNULL`.
+- Pass the callable to `Protocol` positionally, as already required by
+  `Connection`; a `tool=` keyword is forwarded to the remote method.
+  `Connection` rejects streaming calls with `TypeError` and calls from its
+  log-delivery thread with `RuntimeError`.
+- The wire format changed: `COMPRESSED` applies to individual frames and
+  `rmote.protocol.LogRecord` is a tuple instead of a `TypedDict`. Independently
+  started peers must use matching versions; normal connections bootstrap theirs.
+
+Python 3.11+ remains required. The remote bootstrap uses only the standard library;
+individual tools still require their platform facilities and permissions.
+
+## 0.5.0 — 2026-10-03
+
+This release adds file and directory synchronization over the existing Python
+connection, expands filesystem and Linux configuration tools, and switches
+protocol compression to gzip.
+
+### File and directory synchronization
+
+`FileSync.upload` and `FileSync.download` synchronize one file in either
+direction. They compare SHA-256 hashes of fixed-size blocks and send only
+changed content. The receiver reuses matching destination blocks, verifies the
+completed file and installs it with an atomic replacement. The result reports
+whether the file changed and how many bytes were transferred or reused.
+
+Existing destination permissions and ownership are preserved; new files use
+mode `0600`. Timestamps, ACLs and extended attributes are not copied. Transfers
+need temporary space for the complete file, even when little content changes.
+See the [FileSync API](api/tools/file_sync.md).
+
+`Rsync.upload` and `Rsync.download` extend this to directory contents, including
+empty directories and symbolic links. They support exclusion patterns,
+permission preservation, optional destination ownership and optional removal
+of extra entries with `delete=True`. Excluded entries remain untouched, and
+symlinks are copied without following them. No external `rsync` executable is
+required. Replacement is atomic per file; the whole directory operation is not
+a transaction. See the [Rsync API](api/tools/rsync.md).
+
+Call these upload/download helpers directly with an open asynchronous
+`Protocol`, for example `await FileSync.upload(remote, source, destination)`.
+They coordinate the transfer locally through ordinary Tool RPCs.
+
+### Filesystem and system configuration
+
+- `FileSystem` gains idempotent `write`, `directory`, `symlink` and `absent`
+  operations, plus `stat` returning a typed `StatResult`. File and directory
+  operations can manage permissions and ownership.
+- `Hostname` reads and sets the Linux hostname, persists changes to
+  `/etc/hostname`, and manages entries in `/etc/hosts`.
+- `Sysctl` reads kernel parameters and applies values at runtime and in
+  `/etc/sysctl.d`. It supports individual settings and convergence of a group
+  of settings. Mutating system configuration requires appropriate privileges.
+
+### Protocol and documentation
+
+Packet and bootstrap compression use gzip instead of LZMA to reduce CPU cost.
+SSH and subprocess connections bootstrap the matching protocol implementation;
+independently started peers must use the same compression format.
+
+API documentation moves to Markdown with Sphinx, MyST and autodoc. Runnable
+examples cover the built-in tools and file transfers; system-changing examples
+run in disposable Docker containers. Systemd test containers disable binfmt
+handling so their startup cannot clear the host's registered handlers.
+
+[Full changelog](https://github.com/mosquito/rmote/compare/0.4.1...0.5.0).
+
 ## 0.4.1 — 2026-10-02
 
 Documentation links in the README and package metadata now point to
