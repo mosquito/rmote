@@ -10,7 +10,7 @@ import pytest
 
 from rmote.protocol import Flags, Tool
 from rmote.sync import Connection
-from tests.tools_cases.concurrent_tools import FirstCounter, SecondCounter
+from tests.support.tool_cases.concurrent_tools import FirstCounter, SecondCounter
 
 pytestmark = pytest.mark.timeout(15)
 

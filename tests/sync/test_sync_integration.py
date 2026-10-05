@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from rmote.sync import Connection
-from tests.sync_integration_tools import TransportChecks
+from tests.sync.integration_tools import TransportChecks
 
 pytestmark = pytest.mark.timeout(20)
 

@@ -14,7 +14,7 @@ import pytest
 
 from rmote.protocol import Protocol
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

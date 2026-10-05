@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 from rmote.sync import Connection
-from tests.ssh_fixtures import local_sshd as local_sshd
-from tests.sync_tools import Environment
+from tests.support.ssh import local_sshd as local_sshd
+from tests.sync.tools import Environment
 
 
 def call(connection: Connection, method: Callable[..., Any], *args: Any) -> Any:

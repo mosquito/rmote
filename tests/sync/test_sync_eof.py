@@ -5,7 +5,7 @@ import pytest
 
 from rmote.protocol import Flags
 from rmote.sync import Connection
-from tests.sync_tools import Methods
+from tests.sync.tools import Methods
 
 
 @pytest.mark.parametrize("explicit_timeout", [False, True])

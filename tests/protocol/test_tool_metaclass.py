@@ -3,15 +3,15 @@
 import pytest
 
 from rmote.protocol import Tool, tool_from_dict, tool_to_dict
-from tests.tools_cases.config_tool import ConfigTool
-from tests.tools_cases.custom_class import BBoxTool
-from tests.tools_cases.inheritance import BaseTool, DerivedTool
-from tests.tools_cases.json_tool import JsonTool
-from tests.tools_cases.math_tool import MathTool
-from tests.tools_cases.module_enum import Direction, DirectionTool
-from tests.tools_cases.nested_dataclass import GeometryTool
-from tests.tools_cases.nested_enum import ColorTool
-from tests.tools_cases.simple import SimpleTool
+from tests.support.tool_cases.config_tool import ConfigTool
+from tests.support.tool_cases.custom_class import BBoxTool
+from tests.support.tool_cases.inheritance import BaseTool, DerivedTool
+from tests.support.tool_cases.json_tool import JsonTool
+from tests.support.tool_cases.math_tool import MathTool
+from tests.support.tool_cases.module_enum import Direction, DirectionTool
+from tests.support.tool_cases.nested_dataclass import GeometryTool
+from tests.support.tool_cases.nested_enum import ColorTool
+from tests.support.tool_cases.simple import SimpleTool
 
 
 class TestToolMetaclass:

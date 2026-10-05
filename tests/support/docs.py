@@ -10,7 +10,7 @@ import pytest
 
 from rmote.protocol import Protocol
 from rmote.sync import Connection
-from tests.test_sync_connection import local_sshd as local_sshd
+from tests.support.ssh import local_sshd as local_sshd
 
 
 @pytest.fixture

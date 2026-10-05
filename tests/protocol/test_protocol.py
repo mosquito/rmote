@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from rmote.protocol import Protocol, Tool, tool_from_dict, tool_to_dict
-from tests.tools_cases.same_name_a import SameNameTool as SameNameToolA
-from tests.tools_cases.same_name_b import SameNameTool as SameNameToolB
+from tests.support.tool_cases.same_name_a import SameNameTool as SameNameToolA
+from tests.support.tool_cases.same_name_b import SameNameTool as SameNameToolB
 
 
 class SimpleTool(Tool):

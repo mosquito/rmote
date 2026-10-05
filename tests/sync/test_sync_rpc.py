@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from rmote.sync import Connection
-from tests.sync_tools import Methods
+from tests.sync.tools import Methods
 
 
 def wait_started(marker: Path) -> None:
