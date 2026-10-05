@@ -7,6 +7,7 @@ handshake, and the rest is dropped so that a chatty host cannot fill the pipe.
 """
 
 import asyncio
+import signal
 import sys
 
 import pytest
@@ -139,6 +140,40 @@ async def test_close_releases_paused_pipes_after_the_process_exits():
     finally:
         transport.close()
         await process.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ignore_term", [False, True], ids=["terminate", "kill"])
+async def test_close_reaps_the_process_before_closing_its_transport(ignore_term, caplog):
+    handler = "signal.SIG_IGN" if ignore_term else "lambda *_: os._exit(23)"
+    script = (
+        "import os, signal, time; "
+        f"signal.signal(signal.SIGTERM, {handler}); "
+        "os.close(0); os.close(1); os.close(2); time.sleep(60)"
+    )
+    remote = await Protocol.from_command(sys.executable, "-c", script)
+    process = remote._owned_process
+    assert process is not None
+    transport = process._transport  # type: ignore[attr-defined]
+    loop = asyncio.get_running_loop()
+    debug = loop.get_debug()
+    try:
+        loop.set_debug(True)
+        # EOF is sent only after the child has installed its signal handler.
+        async with asyncio.timeout(5):
+            assert remote._stderr_task is not None
+            await remote._stderr_task
+            await remote.__aexit__(None, None, None)
+        assert process.returncode == (-signal.SIGKILL if ignore_term else 23)
+        assert remote._owned_process is None
+        assert transport.is_closing()
+        assert "Close running child process" not in caplog.text
+    finally:
+        if process.returncode is None:
+            process.kill()
+        transport.close()
+        await process.wait()
+        loop.set_debug(debug)
 
 
 def test_the_failure_names_both_streams():

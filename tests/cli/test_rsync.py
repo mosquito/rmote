@@ -11,7 +11,13 @@ from rmote.cli import build_parser
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, "-m", "rmote", "rsync", *args], capture_output=True, text=True, timeout=20)
+    return subprocess.run(
+        [sys.executable, "-m", "rmote", "rsync", *args],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PYTHONASYNCIODEBUG": "1"},
+    )
 
 
 def test_directory_round_trip_logs_reuse_and_delete(tmp_path: Path) -> None:
@@ -173,6 +179,17 @@ def test_quiet_and_keep_permissions(tmp_path: Path) -> None:
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
     assert target.read_bytes() == b"new"
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_debug_includes_asyncio_diagnostics(tmp_path: Path) -> None:
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"payload")
+    result = run_cli("--debug", str(source), f"remote:{target}")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert "execute program" in result.stderr
+    assert "7 bytes transferred" in result.stderr
+    assert target.read_bytes() == b"payload"
 
 
 def test_partial_reuse_still_logs_changed_file(tmp_path: Path) -> None:

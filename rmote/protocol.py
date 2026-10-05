@@ -1701,16 +1701,35 @@ class Protocol(BaseProtocol):
         except Exception:
             pass
         if self._owned_process is not None:
+            process = self._owned_process
+            transport = process._transport  # type: ignore[attr-defined]
             try:
-                self._owned_process.terminate()
+                process.terminate()
             except ProcessLookupError:
                 pass
-            # Process.wait() can return as soon as returncode is set, even
-            # with paused or inherited output pipes still open. asyncio has
-            # no public Process.close(); the owned transport closes all pipes.
-            self._owned_process._transport.close()  # type: ignore[attr-defined]
-            await self._owned_process.wait()
-            self._owned_process = None
+            # Paused or inherited output pipes must not hold wait() open.
+            # Close the pipes first, but keep the process transport alive
+            # until the child is reaped: closing it early implicitly kills
+            # the child and emits an asyncio debug warning.
+            for fd in (1, 2):
+                pipe = transport.get_pipe_transport(fd)
+                if pipe is not None:
+                    pipe.close()
+            try:
+                try:
+                    async with asyncio.timeout(1):
+                        await process.wait()
+                except (TimeoutError, asyncio.CancelledError) as error:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+            finally:
+                transport.close()
+                self._owned_process = None
         # Records that arrived before the close must reach their handlers.
         await asyncio.to_thread(self._logs.stop)
 

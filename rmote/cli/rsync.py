@@ -184,7 +184,10 @@ def run(args: argparse.Namespace) -> int:
     if not 1 <= args.block_size <= 16 * 1024 * 1024:
         args.__parser__.error("--block-size must be between 1 and 16777216")
     level = logging.DEBUG if args.debug else logging.WARNING if args.quiet else logging.INFO
-    logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.WARNING, format="%(message)s", stream=sys.stderr
+    )
+    logging.getLogger("rmote").setLevel(level)
     started = time.monotonic()
     log.debug("%r -> %r", args.source, args.target)
     try:

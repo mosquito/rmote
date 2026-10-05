@@ -56,7 +56,10 @@ def cli(request: pytest.FixtureRequest) -> list[str]:
     return list(request.param)
 
 
-def test_shell_dispatch_preserves_bytes_transport_and_exit_status(cli: list[str]) -> None:
+def test_shell_dispatch_preserves_bytes_transport_and_exit_status(
+    cli: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONASYNCIODEBUG", "1")
     payload = bytes(range(256))
     result = subprocess.run(
         [
