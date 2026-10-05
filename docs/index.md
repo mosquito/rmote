@@ -48,6 +48,7 @@ client unpickles returned data.
 quickstart
 writing-tools
 shell
+sshmux
 multi-host
 templating
 template-filters

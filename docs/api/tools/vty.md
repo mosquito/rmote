@@ -9,7 +9,7 @@ The module needs a POSIX host, because a terminal comes from `pty` and
 
 The output call is a streaming call, so the bytes arrive as the child writes
 them. See [interactive shell](../../shell.md) for the command line client built
-on this tool.
+on this tool, or [SSH multiplexing](../../sshmux.md) for ordinary OpenSSH clients.
 
 ```{eval-rst}
 .. autoclass:: rmote.tools.vty.Vty

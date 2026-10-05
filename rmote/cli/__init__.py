@@ -3,7 +3,7 @@
 import argparse
 from collections.abc import Callable
 
-from rmote.cli import shell
+from rmote.cli import shell, sshmux
 
 
 class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -17,6 +17,7 @@ def build_parser(prog: str = "rmote") -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(required=True, title="commands")
     shell.configure_parser(subparsers.add_parser("shell", help="Open an interactive terminal shell."))
+    sshmux.configure_parser(subparsers.add_parser("sshmux", help="Serve OpenSSH sessions over one connection."))
     for command in subparsers.choices.values():
         command.formatter_class = HelpFormatter
     return parser
