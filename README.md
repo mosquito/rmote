@@ -24,7 +24,8 @@ on a connection.
 python -m pip install rmote
 ```
 
-Python 3.11 or newer is required locally too. Package and service tools also
+Python 3.11 or newer is required locally too. Free-threaded builds work on
+both sides, and the tests cover 3.13t and 3.14t. Package and service tools also
 need the target's system commands and sufficient permissions. rmote does not
 install tool dependencies or elevate privileges automatically.
 
