@@ -24,10 +24,11 @@ pytestmark = pytest.mark.timeout(60)
 
 
 class Counting(Protocol):
-    """Count the packets that carry records and nothing else.
+    """Count standalone packets carrying records from the logger under test.
 
     The count starts with the connection, so no packet escapes it. A patched
     method could not do that: the loop already waits inside receive.
+    Unrelated logs, including asyncio timing diagnostics, still get delivered.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -36,7 +37,11 @@ class Counting(Protocol):
 
     async def receive(self):
         packet = await super().receive()
-        if packet.flags & Flags.LOG and not packet.flags & Flags.RESPONSE:
+        if (
+            packet.flags & Flags.LOG
+            and not packet.flags & Flags.RESPONSE
+            and any(item[0] == "delivery-test" for item in packet.payload)
+        ):
             self.log_packets += 1
         return packet
 
