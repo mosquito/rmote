@@ -78,12 +78,18 @@ def fake_interpreter(tmp_path: Path, script: str) -> str:
     return str(path)
 
 
-def record_processes(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.subprocess.Process]:
+def record_processes(
+    monkeypatch: pytest.MonkeyPatch, *, pause_stderr: bool = False
+) -> list[asyncio.subprocess.Process]:
     processes: list[asyncio.subprocess.Process] = []
     original = asyncio.create_subprocess_exec
 
     async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
         process = await original(*args, **kwargs)
+        if pause_stderr:
+            pipe = process._transport.get_pipe_transport(2)  # type: ignore[attr-defined]
+            pipe.pause_reading()
+            assert not pipe.is_reading()
         processes.append(process)
         return process
 
@@ -102,7 +108,10 @@ def test_eof_before_handshake_reaps_process(tmp_path, monkeypatch):
     assert set(threading.enumerate()) == threads
 
 
-def test_handshake_timeout_drains_stderr_and_kills_stubborn_process(tmp_path, monkeypatch, deadline, fifo):
+@pytest.mark.parametrize("pause_stderr", [False, True], ids=["reading", "paused"])
+def test_handshake_timeout_closes_pipes_and_kills_stubborn_process(
+    tmp_path, monkeypatch, deadline, fifo, pause_stderr
+):
     timer = deadline("rmote.sync")
     executable = fake_interpreter(
         tmp_path,
@@ -110,11 +119,12 @@ def test_handshake_timeout_drains_stderr_and_kills_stubborn_process(tmp_path, mo
             "import os, signal, threading\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             f"with open({str(fifo.path)!r}, 'wb', buffering=0) as ready: ready.write(b'x')\n"
-            "os.write(2, b'x' * 1048576)\n"
+            "try: os.write(2, b'x' * 1048576)\n"
+            "except BrokenPipeError: pass\n"
             "threading.Event().wait()\n"
         ),
     )
-    processes = record_processes(monkeypatch)
+    processes = record_processes(monkeypatch, pause_stderr=pause_stderr)
     threads = set(threading.enumerate())
     with ThreadPoolExecutor(max_workers=1) as pool:
         start = pool.submit(
@@ -129,6 +139,9 @@ def test_handshake_timeout_drains_stderr_and_kills_stubborn_process(tmp_path, mo
         with pytest.raises(TimeoutError):
             start.result(5)
     assert processes[0].returncode == -signal.SIGKILL
+    transport = processes[0]._transport  # type: ignore[attr-defined]
+    assert transport.is_closing()
+    assert all(transport.get_pipe_transport(fd).is_closing() for fd in (0, 1, 2))
     assert set(threading.enumerate()) == threads
 
 
