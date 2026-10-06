@@ -24,7 +24,11 @@ async def protocol():
     proto = await Protocol.from_subprocess(process)
     async with proto:
         yield proto
-    process.terminate()
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        # Closing the protocol may already have let the interpreter exit.
+        pass
     await process.wait()
 
 
