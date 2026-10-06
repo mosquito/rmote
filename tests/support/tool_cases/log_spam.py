@@ -8,6 +8,8 @@ from rmote.protocol import Tool
 
 
 class LogSpam(Tool):
+    pending: asyncio.Event | None = None
+
     @staticmethod
     def speak(count: int, delay: float = 0.0, label: str = "record") -> int:
         """Emit *count* records from a worker thread of the remote side."""
@@ -36,3 +38,15 @@ class LogSpam(Tool):
         logger = logging.getLogger("delivery-test")
         asyncio.get_running_loop().call_later(delay, logger.warning, "%s", message)
         return delay
+
+    @staticmethod
+    async def speak_until_released() -> int:
+        LogSpam.pending = asyncio.Event()
+        logging.getLogger("delivery-test").warning("record 0")
+        await LogSpam.pending.wait()
+        return 1
+
+    @staticmethod
+    async def release() -> None:
+        if LogSpam.pending is not None:
+            LogSpam.pending.set()

@@ -154,15 +154,14 @@ async def test_a_record_of_a_call_travels_with_its_response(capture):
 
 
 @pytest.mark.asyncio
-async def test_a_record_of_a_call_in_a_thread_travels_with_its_response(capture):
-    async with await Counting.from_command(python=sys.executable) as remote:
+async def test_records_of_threaded_calls_are_delivered(capture):
+    async with await Protocol.from_command(python=sys.executable) as remote:
         for _ in range(20):
             assert await remote(LogSpam.speak, 1) == 1
         await wait_for(capture, 20)
-        # A record of a worker thread reaches the handler before the response
-        # is sent. Only a stall above ATTACH_DELAY gives it a packet of its own,
-        # so a few packets are left on a machine under load.
-        assert remote.log_packets <= 5
+    # A scheduler delay beyond ATTACH_DELAY may give any record its own
+    # packet. Either route must deliver every record exactly once.
+    assert capture.messages == ["record 0"] * 20
 
 
 @pytest.mark.asyncio
@@ -173,16 +172,34 @@ async def test_records_keep_their_order(protocol, capture):
 
 
 @pytest.mark.asyncio
-async def test_a_slow_handler_does_not_hold_up_calls(capture, isolated_remote):
-    capture.delay = 0.02
-    # Twenty records cost the handler 0.4 s. The calls must not wait for it.
-    start = time.perf_counter()
-    for _ in range(20):
+async def test_a_slow_handler_does_not_hold_up_calls(capture, isolated_remote, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    emit = capture.emit
+
+    def blocked(item):
+        entered.set()
+        release.wait()
+        emit(item)
+
+    monkeypatch.setattr(capture, "emit", blocked)
+    # Release an incorrectly inline handler too, so a regression fails
+    # instead of leaving the event loop stuck inside logging.
+    watchdog = threading.Timer(10.0, release.set)
+    watchdog.start()
+    try:
         assert await isolated_remote(LogSpam.speak, 1) == 1
-    spent = time.perf_counter() - start
-    assert spent < 0.2
+        assert await asyncio.to_thread(entered.wait, 10.0)
+        for _ in range(19):
+            assert await isolated_remote(LogSpam.speak, 1) == 1
+        assert not release.is_set(), "RPC calls waited for the blocked log handler"
+        assert capture.messages == []
+    finally:
+        release.set()
+        watchdog.cancel()
+        watchdog.join()
     await asyncio.to_thread(isolated_remote._logs.stop)
-    assert len(capture.messages) == 20
+    assert capture.messages == ["record 0"] * 20
 
 
 @pytest.mark.asyncio
@@ -242,12 +259,13 @@ async def test_a_record_after_an_attached_batch_still_travels(protocol, capture)
 
 @pytest.mark.asyncio
 async def test_a_long_call_does_not_hold_its_records(protocol, capture):
-    """The record waits for a response no longer than ATTACH_DELAY."""
-    call = asyncio.ensure_future(protocol(LogSpam.speak, 1, 0.5))
+    """A record is delivered even while its RPC is waiting for release."""
+    call = asyncio.ensure_future(protocol(LogSpam.speak_until_released))
     try:
-        await wait_for(capture, 1, timeout=0.3)
+        await wait_for(capture, 1)
         assert not call.done()
     finally:
+        await protocol(LogSpam.release)
         assert await call == 1
     assert capture.messages == ["record 0"]
 
