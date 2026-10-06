@@ -31,7 +31,8 @@ with Connection.from_local() as remote:
 ```
 
 Replace `Connection.from_local()` with `Connection.from_ssh("user@server")`
-to check another machine. The path is interpreted on that machine.
+to check another machine, or choose another of rmote's {doc}`transports`.
+The path is interpreted on that machine.
 rmote sends `disk_tools.py` when `Disk` is first called on the connection.
 
 ## Modules and packages as tools

@@ -7,6 +7,9 @@ arrives as soon as the target produces it. `rmote.cache.Cache` lives on the
 controller. Each collector owns a top-level key, so refreshing one branch
 preserves the others.
 
+The connection can use any of rmote's {doc}`transports <../../transports>`;
+the collectors and their call interface stay the same.
+
 `facts.gather` collects on the side that runs it. Pass it through RPC
 (`await remote(facts.gather)`) to do the whole collection on the target in one
 call and one answer, or call it directly to collect the local host.

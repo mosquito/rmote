@@ -1,4 +1,4 @@
-"""Local terminal client and the ``rmote-shell`` entry point.
+"""Local terminal client and the ``rmote shell`` entry point.
 
 The client bridges the local standard descriptors to a session that the Vty tool
 starts on the remote host. The transport is any command that passes stdin and
@@ -27,7 +27,7 @@ from rmote.tools.vty import Vty, launcher_source
 TerminalAttributes = list[int | list[bytes | int]]
 
 DEFAULT_ESCAPE = "~"
-CLOSED_MESSAGE = b"\r\nrmote-shell: session closed\r\n"
+CLOSED_MESSAGE = b"\r\nrmote shell: session closed\r\n"
 
 STDIN = 0
 STDOUT = 1
@@ -450,24 +450,23 @@ async def run_shell(
         release()
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the command line parser of ``rmote-shell``."""
-    parser = argparse.ArgumentParser(
-        prog="rmote-shell",
-        description=(
-            "Open an interactive shell on a host. The transport command starts a "
-            "Python interpreter at the far end, and rmote runs a session inside it."
-        ),
-        epilog=(
-            "Examples: rmote-shell ssh server | "
-            "rmote-shell docker exec -i container | "
-            "rmote-shell --command /bin/bash --command=-l ssh server"
-        ),
+def configure_parser(parser: argparse.ArgumentParser) -> None:
+    """Register shell arguments and their handler on a subcommand parser."""
+    parser.description = (
+        "Open an interactive shell on a host. The transport command starts a "
+        "Python interpreter at the far end, and rmote runs a session inside it."
     )
+    parser.epilog = (
+        f"Examples: {parser.prog} ssh server | "
+        f"{parser.prog} docker exec -i container | "
+        f"{parser.prog} --command /bin/bash --command=-l ssh server"
+    )
+    parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument(
+        "-p",
         "--python",
         default="python3",
-        help="Python executable to start at the far end (default: python3).",
+        help="Python executable to start at the far end.",
     )
     parser.add_argument(
         "--command",
@@ -478,26 +477,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run this command instead of the login shell. Repeat it for each argument.",
     )
     parser.add_argument(
+        "-t",
         "--term",
         default=None,
-        help="Value of TERM for the remote child (default: the local TERM).",
+        help="Remote TERM; inherit the local TERM when omitted.",
     )
     parser.add_argument(
+        "-e",
         "--escape",
         default=DEFAULT_ESCAPE,
         help="Escape character for the closing sequence <escape>. An empty value disables it.",
     )
     parser.add_argument(
+        "-T",
         "--no-pty",
         action="store_true",
         help="Use pipes instead of a terminal, for the times when exact bytes matter more.",
     )
     parser.add_argument(
+        "-E",
         "--transport-stderr",
         action="store_true",
         help="Show the stderr of the transport command, for example ssh messages.",
     )
     parser.add_argument(
+        "-v",
         "--debug",
         action="store_true",
         help="Write protocol debug logs to stderr.",
@@ -508,12 +512,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TRANSPORT",
         help="Transport command and its arguments, for example: ssh server",
     )
-    return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Entry point of the ``rmote-shell`` console script."""
-    args = build_parser().parse_args(argv)
+def run(args: argparse.Namespace) -> int:
+    """Run a shell using parsed command line arguments."""
+    prog = args.__prog__
     transport = list(args.transport)
     # argparse keeps a leading separator in the remainder.
     if transport and transport[0] == "--":
@@ -538,13 +541,9 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except NotImplementedError as error:
         # The host has no terminal. Pipes still work, so name the option.
-        print(f"rmote-shell: {error}", file=sys.stderr)
-        print("rmote-shell: run it again with --no-pty to use pipes.", file=sys.stderr)
+        print(f"{prog}: {error}", file=sys.stderr)
+        print(f"{prog}: run it again with --no-pty to use pipes.", file=sys.stderr)
         return 1
     except (OSError, ConnectionError) as error:
-        print(f"rmote-shell: {error}", file=sys.stderr)
+        print(f"{prog}: {error}", file=sys.stderr)
         return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

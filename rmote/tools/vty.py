@@ -49,7 +49,7 @@ def child_options() -> dict[str, Any]:
 
 
 async def end_process(process: asyncio.subprocess.Process) -> None:
-    """End a child process and wait for it, with a deadline on each step.
+    """Signal the child's process group and wait, with a deadline on each step.
 
     SIGHUP comes first, because a shell reads it as the end of its terminal.
     A child that ignores every signal must not hold the cleanup forever, so
@@ -59,7 +59,7 @@ async def end_process(process: asyncio.subprocess.Process) -> None:
     steps = ((signal.SIGHUP, 1.0), (signal.SIGTERM, 2.0), (signal.SIGKILL, 2.0))
     for number, timeout in steps:
         try:
-            process.send_signal(number)
+            os.killpg(process.pid, number)
         except ProcessLookupError:
             return
         try:
@@ -173,6 +173,10 @@ class Session:
         """Read up to *size* bytes of output. Empty bytes mean the end."""
         raise NotImplementedError
 
+    async def read_stderr(self, size: int) -> bytes:
+        """Read separate stderr, or EOF when it is merged into output."""
+        return b""
+
     async def write(self, data: bytes) -> None:
         """Pass payload bytes to the child."""
         raise NotImplementedError
@@ -233,6 +237,11 @@ class PipeSession(ProcessSession):
     async def read(self, size: int) -> bytes:
         assert self.process.stdout is not None, "stdout must be a pipe"
         return await self.process.stdout.read(size)
+
+    async def read_stderr(self, size: int) -> bytes:
+        if self.process.stderr is None:
+            return b""
+        return await self.process.stderr.read(size)
 
     async def write(self, data: bytes) -> None:
         stdin = self.process.stdin
@@ -387,6 +396,7 @@ class Vty(Tool):
         cwd: str | None = None,
         want_pty: bool = True,
         launcher: str = "",
+        separate_stderr: bool = False,
     ) -> int:
         """Start a command and return the key of its session.
 
@@ -405,6 +415,9 @@ class Vty(Tool):
                 The caller produces it with launcher_source(), because a
                 transferred module has no file of its own. An empty value makes
                 this side produce it, which works only with the file present.
+            separate_stderr: Keep stderr separate in pipe mode. Read it with
+                stderr() concurrently with output() to avoid blocking the child.
+                A terminal always combines stdout and stderr.
 
         Returns:
             The key of the session, for the other methods.
@@ -429,7 +442,7 @@ class Vty(Tool):
                 *command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE if separate_stderr else asyncio.subprocess.STDOUT,
                 env=child_env,
                 cwd=cwd,
                 **child_options(),
@@ -439,6 +452,35 @@ class Vty(Tool):
         Vty.last_key += 1
         Vty.sessions[Vty.last_key] = session
         return Vty.last_key
+
+    @staticmethod
+    async def shell(
+        command: str = "",
+        *,
+        rows: int = 24,
+        cols: int = 80,
+        term: str = "",
+        env: dict[str, str] | None = None,
+        want_pty: bool = True,
+        launcher: str = "",
+    ) -> int:
+        """Run a command through the remote user's shell, or open a login shell.
+
+        Pipe sessions keep stderr separate; read stderr() alongside output().
+        All other arguments have the same meaning as in open().
+        """
+        shell = default_shell()
+        argv = [shell, "-c", command] if command else [shell, "-l"]
+        return await Vty.open(
+            argv,
+            rows=rows,
+            cols=cols,
+            term=term,
+            env=env,
+            want_pty=want_pty,
+            launcher=launcher,
+            separate_stderr=True,
+        )
 
     @staticmethod
     async def output(key: int) -> AsyncIterator[bytes]:
@@ -458,6 +500,13 @@ class Vty(Tool):
             data = await session.read(Vty.CHUNK_SIZE)
             if not data:
                 return
+            yield data
+
+    @staticmethod
+    async def stderr(key: int) -> AsyncIterator[bytes]:
+        """Yield separate stderr until EOF; empty for terminals or merged pipes."""
+        session = Vty.sessions[key]
+        while data := await session.read_stderr(Vty.CHUNK_SIZE):
             yield data
 
     @staticmethod

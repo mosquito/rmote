@@ -43,6 +43,16 @@ def test_direct_constructor_rejected():
         Connection()
 
 
+def test_command_transport_environment_and_close(tmp_path):
+    with Connection.from_command(
+        "env", "RMOTE_SYNC_TEST=command", python=sys.executable, cwd=str(tmp_path)
+    ) as connection:
+        process = connection._process
+        assert process is not None
+        assert connection(Environment.inspect) == (str(tmp_path.resolve()), "command")
+    assert process.returncode is not None
+
+
 @pytest.mark.parametrize("field", ["connect_timeout", "rpc_timeout", "close_timeout"])
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
 def test_invalid_deadline_before_start(field, value, monkeypatch):

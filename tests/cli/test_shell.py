@@ -1,4 +1,4 @@
-"""Tests for the local terminal client and the rmote-shell entry point."""
+"""Tests for the local terminal client and the rmote shell entry point."""
 
 import fcntl
 import os
@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from rmote.shell import EscapeFilter, NonBlocking, TerminalMode, build_parser, regular_file, terminal_size
+from rmote.cli.shell import EscapeFilter, NonBlocking, TerminalMode, regular_file, terminal_size
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="requires a POSIX terminal")
 
@@ -25,7 +25,7 @@ def drive_shell(
     size: tuple[int, int] = (24, 80),
     env: dict[str, str] | None = None,
 ) -> tuple[int, bytes]:
-    """Run rmote-shell behind a terminal, feed *script*, collect the output.
+    """Run rmote shell behind a terminal, feed *script*, collect the output.
 
     The client needs a real terminal to enter raw mode, so the test owns the
     master side and the client gets the slave side as its standard descriptors.
@@ -42,7 +42,7 @@ def drive_shell(
         child_env.update(env)
 
     process = subprocess.Popen(
-        [sys.executable, "-m", "rmote.shell", *args],
+        [sys.executable, "-m", "rmote", "shell", *args],
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
@@ -85,9 +85,9 @@ def drive_shell(
 
 
 def run_piped(args: list[str], payload: bytes) -> subprocess.CompletedProcess[bytes]:
-    """Run rmote-shell with pipes instead of a terminal."""
+    """Run rmote shell with pipes instead of a terminal."""
     return subprocess.run(
-        [sys.executable, "-m", "rmote.shell", *args],
+        [sys.executable, "-m", "rmote", "shell", *args],
         input=payload,
         capture_output=True,
         timeout=DRIVE_TIMEOUT,
@@ -95,10 +95,10 @@ def run_piped(args: list[str], payload: bytes) -> subprocess.CompletedProcess[by
 
 
 def run_from_file(args: list[str], source) -> subprocess.CompletedProcess[bytes]:
-    """Run rmote-shell with its input redirected from a regular file."""
+    """Run rmote shell with its input redirected from a regular file."""
     with open(source, "rb") as handle:
         return subprocess.run(
-            [sys.executable, "-m", "rmote.shell", *args],
+            [sys.executable, "-m", "rmote", "shell", *args],
             stdin=handle,
             capture_output=True,
             timeout=DRIVE_TIMEOUT,
@@ -227,33 +227,6 @@ class TestHelpers:
             flags.restore()
         finally:
             os.close(fd)
-
-
-class TestParser:
-    def test_transport_takes_the_remainder(self) -> None:
-        args = build_parser().parse_args(["ssh", "server"])
-
-        assert args.transport == ["ssh", "server"]
-        assert args.command == []
-
-    def test_transport_keeps_its_own_options(self) -> None:
-        args = build_parser().parse_args(["ssh", "-p", "2222", "-i", "key", "host"])
-
-        assert args.transport == ["ssh", "-p", "2222", "-i", "key", "host"]
-
-    def test_client_options_come_before_the_transport(self) -> None:
-        args = build_parser().parse_args(["--term", "vt100", "--python", "python3.13", "ssh", "host"])
-
-        assert (args.term, args.python) == ("vt100", "python3.13")
-        assert args.transport == ["ssh", "host"]
-
-    def test_command_option_repeats_for_arguments(self) -> None:
-        args = build_parser().parse_args(["--command", "/bin/bash", "--command=-l", "ssh", "host"])
-
-        assert args.command == ["/bin/bash", "-l"]
-
-    def test_empty_transport_is_allowed(self) -> None:
-        assert build_parser().parse_args([]).transport == []
 
 
 class TestTerminalSessionEndToEnd:

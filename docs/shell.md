@@ -1,37 +1,56 @@
 # Interactive shell
 
-`rmote-shell` opens an interactive shell on a host. The transport command starts
+`rmote shell` opens an interactive shell on a host. The transport command starts
 a Python interpreter at the far end, rmote bootstraps its protocol into that
 interpreter, and the {doc}`Vty tool <api/tools/vty>` opens a session there.
 
 ```bash
-rmote-shell ssh server
+rmote shell ssh server
 ```
+
+The module command is equivalent, with the same options and exit status:
+
+```bash
+python -m rmote shell ssh server
+```
+
+For a Docker container, either form opens a shell:
+
+```bash
+python -m rmote shell -- docker exec -i my-container
+rmote shell -- docker exec -i my-container
+```
+
+Use `-i` without `-t`; rmote creates the remote terminal itself and appends
+`python3 -qui` to the transport command automatically.
 
 The remote side needs only a Python interpreter and the standard library. No
 agent and no package installation are required.
 
 ## The transport is a command
 
+The common {doc}`transports` guide covers command prefixes, local Python,
+prepared streams such as `nc`, and the requirements for carrying protocol bytes.
+
 Everything after the client options is the transport command. rmote appends the
-interpreter and its flags, so `rmote-shell ssh server` runs
+interpreter and its flags, so `rmote shell ssh server` runs
 `ssh server python3 -qui`.
 
 Any command works when it passes stdin and stdout through without changing the
 bytes:
 
 ```bash
-rmote-shell ssh -p 2222 -i ~/.ssh/id_ed25519 user@server
-rmote-shell docker exec -i my-container
-rmote-shell kubectl exec -i pod/my-pod --
-rmote-shell sudo -u postgres
-rmote-shell                                  # a session on the local host
+rmote shell ssh -p 2222 -i ~/.ssh/id_ed25519 user@server
+rmote shell docker exec -i my-container
+rmote shell kubectl exec -i pod/my-pod --
+rmote shell sudo -u postgres
+rmote shell                                  # a session on the local host
 ```
 
-Use `--python` when the interpreter has another name or path:
+Use `-p` / `--python` when the interpreter has another name or path:
 
 ```bash
-rmote-shell --python /usr/local/bin/python3 ssh server
+rmote shell --python /usr/local/bin/python3 ssh server
 ```
 
 ## Terminal or pipes
@@ -42,8 +61,8 @@ size and full screen programs. With a redirected input or output the session
 gets pipes instead:
 
 ```bash
-rmote-shell ssh server                       # a terminal
-rmote-shell --command cat ssh server < file  # pipes
+rmote shell ssh server                       # a terminal
+rmote shell --command cat ssh server < file  # pipes
 ```
 
 Pipes keep the bytes exactly. No carriage return is added, binary data passes
@@ -51,11 +70,11 @@ through, and the end of the local input closes the input of the remote child, so
 a program such as `cat` finishes. A terminal has no half close, so there the end
 of input is reported with the VEOF character, normally Ctrl-D.
 
-`--no-pty` asks for pipes even from a terminal, for the times when exact
+`-T` / `--no-pty` asks for pipes even from a terminal, for the times when exact
 bytes matter more than line editing:
 
 ```bash
-rmote-shell --no-pty --command cat ssh server
+rmote shell --no-pty --command cat ssh server
 ```
 
 A host that cannot give a terminal reports it and names this option, so the
@@ -63,13 +82,13 @@ session is still reachable there.
 
 ## Choosing what runs
 
-Without `--command` the session starts the login shell of the remote user.
+Without `-c` / `--command` the session starts the login shell of the remote user.
 Repeat the option for each argument. An argument that starts with a dash needs
 the `=` form, because the option parser would otherwise read it as an option:
 
 ```bash
-rmote-shell --command /bin/bash --command=-l ssh server
-rmote-shell --command htop ssh server
+rmote shell --command /bin/bash --command=-l ssh server
+rmote shell --command htop ssh server
 ```
 
 ## Closing the session
@@ -84,32 +103,32 @@ end, the same rule as in ssh:
 | `~~` | Send one literal `~`. |
 
 The remote child ends with the session. There is no saved session to come back
-to. `--escape` changes the escape character, and an empty value disables the
+to. `-e` / `--escape` changes the escape character, and an empty value disables the
 sequence:
 
 ```bash
-rmote-shell --escape ^ ssh server
-rmote-shell --escape "" ssh server
+rmote shell --escape ^ ssh server
+rmote shell --escape "" ssh server
 ```
 
 ## Window size and TERM
 
 The client reports the local window size when the session opens, and again on
-every window change. `TERM` is copied from the local environment, and `--term`
+every window change. `TERM` is copied from the local environment, and `-t` / `--term`
 overrides it.
 
 ## Troubleshooting
 
 A start that fails names its cause: the last lines the transport wrote to its
 stderr go into the error, so a refusal of `ssh` or an interpreter that cannot
-run appears instead of a hang. `--transport-stderr` shows that stream live
-while the session runs, and `--debug` adds protocol logs:
+run appears instead of a hang. `-E` / `--transport-stderr` shows that stream live
+while the session runs, and `-v` / `--debug` adds protocol logs:
 
 ```bash
-rmote-shell --transport-stderr --debug ssh server
+rmote shell --transport-stderr --debug ssh server
 ```
 
-The exit status of `rmote-shell` is the exit status of the remote child. A
+The exit status of `rmote shell` is the exit status of the remote child. A
 command that does not exist is reported through the session and gives status
 127, as a shell does.
 

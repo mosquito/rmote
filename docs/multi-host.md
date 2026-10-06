@@ -3,6 +3,8 @@
 This guide collects log filenames from several SSH hosts. It then adds a
 concurrency limit, handles an unavailable host, and reuses open connections.
 Replace the example hostnames with machines in your SSH configuration.
+The same scheduling pattern applies to other {doc}`transports`; choose the
+appropriate connection factory for each target.
 
 ## Collect Results with a Concurrency Limit
 

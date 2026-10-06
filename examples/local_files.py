@@ -1,4 +1,4 @@
-"""Run a local async client with explicit subprocess ownership."""
+"""Run with python examples/local_files.py after installing rmote."""
 
 import asyncio
 import logging

@@ -1,6 +1,7 @@
 """Synchronize directory contents using FileSync for regular files."""
 
 import asyncio
+import logging
 import os
 import stat
 from collections.abc import Awaitable, Callable, Iterable
@@ -12,6 +13,8 @@ from typing import Any
 
 from rmote.protocol import Tool
 from rmote.tools.file_sync import FileSync
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,12 +52,25 @@ class Result:
 class Rsync(Tool):
     """Synchronize the contents of a directory into another directory.
 
+    Built for hosts and containers where the remote runtime is just Python
+    3.11+ and its standard library. Only the controlling machine needs rmote
+    installed: the remote side needs no rsync executable, rmote package,
+    third-party Python dependencies or separately installed agent. The transport
+    starts Python; rmote bootstraps the connection and sends the required tool
+    code and its dependencies automatically.
+
+    This makes directory synchronization available to automation without
+    provisioning transfer software on each target. Reuse the same Protocol
+    connection as other tools. FileSync compares content and reuses matching
+    destination blocks, so repeated uploads or downloads send changed content.
+
     Call upload/download directly with an open async Protocol. Both directions
     use the same traversal and compare every regular file through FileSync,
     even when size and mtime match. A trailing slash has no special meaning.
     Empty directories and symbolic links (including dangling links) are copied.
     Links are never traversed. Type conflicts and special source files raise
-    ValueError. Extra destination entries are retained unless delete=True.
+    ValueError. Extra destination entries are retained unless delete=True or
+    delete_excluded=True.
 
     Exclusions are case-sensitive globs over relative POSIX paths. A pattern
     without a slash matches an entry name at any depth (``*.pyc``, ``.git/``).
@@ -66,7 +82,9 @@ class Rsync(Tool):
     For example, ``exclude=(".git/", "__pycache__/", "*.pyc", "build/**")``.
     Excluded directories are not traversed. Excluded destination entries and
     their necessary parents survive delete=True, including in destination-only
-    subtrees. Their contents, modes and ownership are left untouched.
+    subtrees. Their contents, modes and ownership are left untouched, unless
+    delete_excluded=True: this implies deletion and removes excluded destination
+    entries too. Excluded source entries are still not transferred.
 
     Transfers are atomic per file, not per tree. Deletion starts only after all
     content transfers succeed. On failure, completed changes remain; retry to
@@ -83,7 +101,11 @@ class Rsync(Tool):
     owner/group optionally set destination ownership (names resolved there),
     including symlinks themselves. Without them, no ownership change is requested;
     new entries use the creating process and destination directory defaults.
-    No external rsync executable is needed.
+
+    The local coordinator logs changed files and their transferred/reused
+    content bytes at INFO under ``rmote.tools.rsync``, along with directory,
+    symlink and deletion changes. Metadata details use DEBUG. Configure Python
+    logging to observe progress; the tool does not install handlers or print to stdout.
 
     Example with a real local subprocess:
 
@@ -124,12 +146,13 @@ class Rsync(Tool):
         remote_path: str | Path,
         *,
         delete: bool = False,
-        concurrency: int = 4,
+        concurrency: int = 32,
         preserve_mode: bool = True,
         block_size: int = 4 * 1024 * 1024,
         owner: str | None = None,
         group: str | None = None,
         exclude: Iterable[str] = (),
+        delete_excluded: bool = False,
     ) -> Result:
         """Copy local directory contents into a remote directory.
 
@@ -138,7 +161,8 @@ class Rsync(Tool):
             local_path: Source directory, relative to the local cwd.
             remote_path: Destination directory, relative to the remote cwd.
             delete: Remove destination-only entries after successful transfers.
-            concurrency: Maximum simultaneous file transfers (positive integer).
+            concurrency: Maximum simultaneous file transfers (positive integer,
+                default 32).
             preserve_mode: Copy source file and directory permission bits.
             block_size: FileSync block size, between 1 byte and 16 MiB;
                 defaults to 4 MiB. A file costs about two calls per block.
@@ -146,6 +170,8 @@ class Rsync(Tool):
             group: Explicit destination group name; None keeps normal grouping.
             exclude: Glob patterns for paths to leave untouched on both sides.
                 See Rsync for matching and deletion rules.
+            delete_excluded: Also remove excluded destination entries; implies
+                delete=True. Excluded source entries are not transferred.
 
         Returns:
             Aggregate change status and transfer counters.
@@ -170,6 +196,7 @@ class Rsync(Tool):
             owner,
             group,
             exclude,
+            delete_excluded,
         )
 
     @staticmethod
@@ -179,12 +206,13 @@ class Rsync(Tool):
         local_path: str | Path,
         *,
         delete: bool = False,
-        concurrency: int = 4,
+        concurrency: int = 32,
         preserve_mode: bool = True,
         block_size: int = 4 * 1024 * 1024,
         owner: str | None = None,
         group: str | None = None,
         exclude: Iterable[str] = (),
+        delete_excluded: bool = False,
     ) -> Result:
         """Copy remote directory contents into a local directory.
 
@@ -193,7 +221,8 @@ class Rsync(Tool):
             remote_path: Source directory, relative to the remote cwd.
             local_path: Destination directory, relative to the local cwd.
             delete: Remove destination-only entries after successful transfers.
-            concurrency: Maximum simultaneous file transfers (positive integer).
+            concurrency: Maximum simultaneous file transfers (positive integer,
+                default 32).
             preserve_mode: Copy source file and directory permission bits.
             block_size: FileSync block size, between 1 byte and 16 MiB;
                 defaults to 4 MiB. A file costs about two calls per block.
@@ -201,6 +230,8 @@ class Rsync(Tool):
             group: Explicit destination group name; None keeps normal grouping.
             exclude: Glob patterns for paths to leave untouched on both sides.
                 See Rsync for matching and deletion rules.
+            delete_excluded: Also remove excluded destination entries; implies
+                delete=True. Excluded source entries are not transferred.
 
         Returns:
             Aggregate change status and transfer counters.
@@ -219,6 +250,7 @@ class Rsync(Tool):
             owner,
             group,
             exclude,
+            delete_excluded,
         )
 
     @staticmethod
@@ -402,6 +434,7 @@ class Rsync(Tool):
         owner: str | None,
         group: str | None,
         exclude: Iterable[str],
+        delete_excluded: bool = False,
     ) -> Result:
         """Shared local coordinator for both directions."""
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
@@ -449,12 +482,16 @@ class Rsync(Tool):
 
         async def metadata(path: str, mode: int | None = None, present: int | None = None) -> None:
             if owner is not None or group is not None:
-                result.changed |= await call(target_remote, Rsync.chown, path, uid, gid)
+                if await call(target_remote, Rsync.chown, path, uid, gid):
+                    result.changed = True
+                    log.debug("chown %r", path)
             # The scan reported the mode of both sides, and FileSync preserves
             # the mode of a destination it replaces, so an equal mode costs no
             # call at all.
             if preserve_mode and mode is not None and mode != present:
-                result.changed |= await call(target_remote, Rsync.chmod, path, mode)
+                if await call(target_remote, Rsync.chmod, path, mode):
+                    result.changed = True
+                    log.debug("chmod %04o %r", mode, path)
 
         async def file(relative: Path, entry: Entry, present: Entry | None) -> None:
             # FileSync opens both ends with O_NOFOLLOW and refuses anything but
@@ -467,6 +504,10 @@ class Rsync(Tool):
             result.reused += item.reused
             result.changed |= item.changed
             await metadata(str(Path(dst) / relative), entry.mode, present.mode if present is not None else None)
+            if item.changed:
+                log.info(
+                    "file %r: %d bytes transferred, %d reused", relative.as_posix(), item.transferred, item.reused
+                )
 
         async def walk(relative: Path, finishing: bool = False) -> None:
             source = str(Path(src) / relative)
@@ -476,6 +517,8 @@ class Rsync(Tool):
                 created = await call(target_remote, Rsync.mkdir, target)
                 result.directories += created
                 result.changed |= created
+                if created:
+                    log.info("mkdir %r", relative.as_posix())
             existing = await call(target_remote, Rsync.scan, target)
             # Exclusion on either side protects the name even across type conflicts.
             protected = {
@@ -485,7 +528,8 @@ class Rsync(Tool):
                 if Rsync.excluded((relative / name).as_posix(), entry.kind, patterns)
             }
             entries = {name: entry for name, entry in entries.items() if name not in protected}
-            existing = {name: entry for name, entry in existing.items() if name not in protected}
+            if not delete_excluded:
+                existing = {name: entry for name, entry in existing.items() if name not in protected}
             for name, entry in entries.items():
                 if entry.kind == "special":
                     raise ValueError(f"Unsupported source entry: {Path(source) / name}")
@@ -506,21 +550,25 @@ class Rsync(Tool):
                         await metadata(str(Path(target) / name))
                         result.symlinks += changed
                         result.changed |= changed
+                        if changed:
+                            log.info("symlink %r -> %r", (relative / name).as_posix(), entry.target)
             for name, entry in entries.items():
                 if entry.kind == "directory":
                     await walk(relative / name, finishing)
             if finishing:
-                if delete:
+                if delete or delete_excluded:
                     for name in existing.keys() - entries.keys():
                         count = await call(
                             target_remote,
                             Rsync.remove,
                             str(Path(target) / name),
                             (relative / name).as_posix(),
-                            patterns,
+                            () if delete_excluded else patterns,
                         )
                         result.deleted += count
                         result.changed |= bool(count)
+                        if count:
+                            log.info("delete %r (%d entries)", (relative / name).as_posix(), count)
                 mode = (await call(source_remote, Rsync.inspect, source)).mode
                 await metadata(target, mode)
 

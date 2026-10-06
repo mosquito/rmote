@@ -1,8 +1,11 @@
 # Synchronous Connection
 
-Import `Connection` from `rmote.sync` or directly from `rmote`.
-Create a connection with `from_local` or `from_ssh`. Direct construction
+Import `Connection` from `rmote.sync`.
+Create a connection with `from_local`, `from_command` or `from_ssh`. Direct construction
 with `Connection()` raises `TypeError`.
+
+See {doc}`../transports` for SSH, Docker/Kubernetes exec, local Python and relay
+adapters. The same connection API and tool calls apply to each transport.
 
 ```{eval-rst}
 .. py:class:: Connection
@@ -12,6 +15,8 @@ with `Connection()` raises `TypeError`.
    Use a factory and close the connection after its callers finish.
 
    .. automethod:: rmote.sync.Connection.from_local
+
+   .. automethod:: rmote.sync.Connection.from_command
 
    .. automethod:: rmote.sync.Connection.from_ssh
 
@@ -30,7 +35,7 @@ with `Connection()` raises `TypeError`.
 
 ## Deadlines
 
-Both factories accept these keyword-only arguments:
+All factories accept these keyword-only arguments:
 
 * `connect_timeout=30.0` limits process creation, bootstrap, and handshake.
 * `rpc_timeout=None` sets the default deadline for each Tool call.

@@ -7,8 +7,11 @@
 [![Tests](https://github.com/mosquito/rmote/actions/workflows/tests.yml/badge.svg)](https://github.com/mosquito/rmote/actions/workflows/tests.yml)
 [![Docs](https://github.com/mosquito/rmote/actions/workflows/docs.yml/badge.svg)](https://docs.rmote.org)
 
-rmote runs Python functions on another machine over SSH. Use its built-in tools
-to manage files, packages, and services, or write a tool for your application.
+rmote runs Python functions through SSH, `docker exec`, `kubectl exec`, or a
+local Python subprocess. Any bidirectional stream that reaches a Python
+interpreter can carry its protocol, including an appropriately connected `nc`
+relay. See [Transports](https://docs.rmote.org/transports.html) for setup and examples.
+Use its built-in tools to manage files, packages, and services, or write a tool for your application.
 Calls return Python values and propagate remote exceptions to the caller.
 
 Install rmote on your local machine. The target needs Python 3.11 or newer,
@@ -52,23 +55,45 @@ the connector.
 
 ## Interactive Shell
 
-`rmote-shell` opens an interactive shell on a host. The transport is any command
+`rmote shell` opens an interactive shell on a host. The transport is any command
 that passes stdin and stdout through unchanged, so the same client reaches hosts
 over SSH, containers and pods.
 
 ```bash
-rmote-shell ssh server
-rmote-shell docker exec -i my-container
-rmote-shell kubectl exec -i pod/my-pod --
+rmote shell ssh server
+rmote shell docker exec -i my-container
+rmote shell kubectl exec -i pod/my-pod --
 ```
+
+`python -m rmote` accepts the same commands and options as `rmote`:
+for example, `python -m rmote shell ssh server`. Run `rmote --help` to list
+commands, or `rmote shell --help` for shell options.
 
 The remote side opens a real pseudo terminal, so job control, full screen
 programs and window resizing all work. A redirected input or output uses pipes
 instead and keeps the bytes exactly. Press `~.` after a line end to close the
 session.
 
+## Python REPL
+
+Open a Python console with a ready connection and remote host facts:
+
+```bash
+rmote repl -- ssh -T server
+rmote repl -- docker exec -i my-container
+rmote repl --async -- ssh -T server
+```
+
+Use `host["system"]` to inspect the host, or
+`remote(facts.gather, sections=["cpu", "memory"])` to collect more facts.
+With `--async`, write `await remote(...)`. Built-in tools are imported and
+you can define your own `Tool` in the console. See the
+[REPL guide](https://docs.rmote.org/repl.html) for examples and script mode.
+
 ## Guides
 
+- [Transports](https://docs.rmote.org/transports.html): SSH, Docker, Kubernetes, local Python and prepared byte streams.
+- [Synchronization CLI](https://docs.rmote.org/rsync.html): `rmote rsync -r 'ssh -T host' ./source remote:/destination`, or the reverse direction.
 - [Writing tools](https://docs.rmote.org/writing-tools.html): define a remote operation and return Python data.
 - [Interactive shell](https://docs.rmote.org/shell.html): run a shell on a host through any transport command.
 - [Multiple hosts](https://docs.rmote.org/multi-host.html): run operations concurrently and handle individual failures.

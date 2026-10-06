@@ -7,7 +7,8 @@ service, start it, and check the result.
 
 For convenience, Docker supplies the target machine. The same deployment works
 over SSH: only the connector changes. You install rmote locally; the target
-needs Python, but does not need rmote or an agent.
+needs Python, but does not need rmote or an agent. See {doc}`transports` for
+the shared connection model and other ways to reach Python.
 
 ## Install rmote
 

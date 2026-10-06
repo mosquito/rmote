@@ -547,8 +547,9 @@ construct `Template(source, filters=...)` and call its `render` method.
 | `render(template, **kw)` | Source string or `Template` instance | Compile on the target or reuse a compiled template |
 | `render_file(path, **kw)` | String or `Path` on the remote filesystem | The template lives on the target |
 
-Call these methods through either client. This example renders in a separate
-Python process; use `Connection.from_ssh` to render on an SSH host:
+Call these methods through either client and any of rmote's {doc}`transports`.
+This example renders in a separate Python process; use `Connection.from_ssh`
+to render on an SSH host:
 
 <!-- name: test_remote_template; fixtures: client_resources; mark: timeout(15) -->
 

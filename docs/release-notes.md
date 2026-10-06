@@ -1,5 +1,21 @@
 # Release notes
 
+## 0.7.0
+
+- Unified `rmote` / `python -m rmote` CLI with short options. Replace
+  `rmote-shell` with `rmote shell`; imports move to `rmote.cli.shell`.
+- [SSH multiplexing](sshmux.md): OpenSSH shell/exec sessions share one rmote
+  connection; `--daemon` supports automatic startup from SSH config.
+- [Python REPL](repl.md) with host facts and tools, plus `--async` for `await`.
+  `Connection.from_command` adds arbitrary transports to the synchronous API.
+- [Synchronization CLI](rsync.md) with transfer logs, exclusions and optional
+  deletion, including `--delete-excluded`. The remote host needs only Python.
+- FileSync runs independent transfers concurrently; Rsync now defaults to
+  32 concurrent files. Adjust this with `-j` or the API's `concurrency` argument.
+- Bootstrap failures preserve transport diagnostics.
+- A shared [transport guide](transports.md) covers SSH, Docker, Kubernetes,
+  local Python and prepared streams such as `nc` relays.
+
 ## 0.6.0
 
 ### New features
