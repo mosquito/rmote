@@ -1,5 +1,16 @@
 # Release notes
 
+## 0.7.1
+
+- Free-threaded CPython is supported on both sides; CI covers 3.13t and 3.14t
+  on Linux and macOS.
+- Fixed REPL hangs during Ctrl-C, subsequent calls, Ctrl-D and SIGTERM.
+- Fixed lost output from short-lived terminal commands on macOS.
+- Fixed unclosed subprocess pipes after a synchronous connection times out.
+- Documented the Python `-qui` transport flags and one SSH config rule for
+  Docker container aliases.
+- Replaced timing-based concurrency tests with explicit synchronization.
+
 ## 0.7.0
 
 - Unified `rmote` / `python -m rmote` CLI with short options. Replace
