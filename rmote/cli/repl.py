@@ -7,9 +7,13 @@ import code
 import inspect
 import linecache
 import logging
+import os
 import signal
 import sys
-from contextlib import AsyncExitStack, ExitStack
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import AsyncExitStack, ExitStack, contextmanager
 from types import CodeType, FrameType, FunctionType, ModuleType
 from typing import Any, Never
 
@@ -112,6 +116,53 @@ def terminate(signum: int, frame: FrameType | None) -> Never:
     raise SystemExit(128 + signum)
 
 
+@contextmanager
+def wake_on_termination() -> Iterator[None]:
+    """Wake readline while a Python SIGTERM handler is pending."""
+    main_thread = threading.get_ident()
+    stopped = False
+
+    def handle(signum: int, frame: FrameType | None) -> None:
+        nonlocal stopped
+        if not stopped:
+            stopped = True
+            terminate(signum, frame)
+
+    with ExitStack() as stack:
+        reader, writer = os.pipe()
+        stack.callback(os.close, reader)
+        stack.callback(os.close, writer)
+        os.set_blocking(writer, False)
+        previous_handler = signal.signal(signal.SIGTERM, handle)
+        stack.callback(signal.signal, signal.SIGTERM, previous_handler)
+        previous_fd = signal.set_wakeup_fd(writer)
+        stack.callback(signal.set_wakeup_fd, previous_fd)
+
+        def wake_main() -> None:
+            while not stopped:
+                data = os.read(reader, 4096)
+                if signal.SIGTERM in data and not stopped:
+                    # Python handles signals in the main thread, but readline
+                    # needs its blocking syscall interrupted first. Retry until
+                    # the handler runs, including a signal just before select.
+                    signal.pthread_kill(main_thread, signal.SIGTERM)
+                    time.sleep(0.01)
+
+        thread = threading.Thread(target=wake_main, name="rmote-repl-signals", daemon=True)
+        try:
+            thread.start()
+            yield
+        finally:
+            stopped = True
+            try:
+                os.write(writer, b"\0")
+            except BlockingIOError:
+                # A full pipe already wakes the reader.
+                pass
+            if thread.ident is not None:
+                thread.join()
+
+
 def run_console(transport: list[str], *, python: str, asynchronous: bool, command: str | None) -> int:
     """Own the connection, console namespace and source cache for one session."""
     with ExitStack() as stack:
@@ -162,7 +213,8 @@ def run_console(transport: list[str], *, python: str, asynchronous: bool, comman
                 return 1
             return int(console.failed)
         enable_completion(main.__dict__, stack)
-        console.interact(banner=banner(host, asynchronous), exitmsg="")
+        with wake_on_termination():
+            console.interact(banner=banner(host, asynchronous), exitmsg="")
         return 0
 
 
