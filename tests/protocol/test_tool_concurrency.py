@@ -4,19 +4,13 @@ import asyncio
 import logging
 import sys
 import threading
-from unittest.mock import MagicMock
 
 import pytest
-import pytest_asyncio
 
-from rmote.protocol import Flags, Protocol, RemoteLogHandler, Tool
+from rmote.protocol import Flags, RemoteLogHandler, Tool
+from tests.support.tool_cases.idle import Idle
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.timeout(10)]
-
-
-@pytest_asyncio.fixture
-async def client():
-    return Protocol(asyncio.StreamReader(), MagicMock(spec=asyncio.StreamWriter))
 
 
 async def test_first_client_sync_is_shared_by_concurrent_callers(client, monkeypatch):
@@ -225,7 +219,7 @@ async def test_log_ids_fit_existing_unsigned_wire_header(client):
         assert client.PACKET_HEADER.unpack(header)[-1] == packet_id
 
 
-async def test_real_subprocess_forwards_sync_async_and_idle_logs(protocol):
+async def test_real_subprocess_forwards_sync_async_and_idle_logs(protocol, fifo, capture_logs):
     class LogTool(Tool):
         @staticmethod
         def emit_sync():
@@ -241,36 +235,12 @@ async def test_real_subprocess_forwards_sync_async_and_idle_logs(protocol):
             logging.getLogger("rmote-concurrency").warning("async record")
             return "async"
 
-        @staticmethod
-        async def schedule_idle():
-            import asyncio
-            import logging
-
-            logger = logging.getLogger("rmote-concurrency")
-            asyncio.get_running_loop().call_later(0.05, logger.warning, "idle record")
-
-    messages = []
-    threads = []
-    idle = threading.Event()
-
-    class Capture(logging.Handler):
-        def emit(self, record):
-            messages.append(record.getMessage())
-            threads.append(threading.get_ident())
-            if record.getMessage() == "idle record":
-                idle.set()
-
-    logger = logging.getLogger("rmote.remote.rmote-concurrency")
-    handler = Capture()
-    logger.addHandler(handler)
-    try:
-        assert await protocol(LogTool.emit_sync) == "sync"
-        assert await protocol(LogTool.emit_async) == "async"
-        await protocol(LogTool.schedule_idle)
-        assert await asyncio.to_thread(idle.wait, 10)
-        assert set(messages) == {"sync record", "async record", "idle record"}
-        # Handlers run in the delivery worker, never in the loop thread.
-        assert threading.get_ident() not in threads
-        assert len(set(threads)) == 1
-    finally:
-        logger.removeHandler(handler)
+    capture = capture_logs("rmote.remote.rmote-concurrency")
+    assert await protocol(LogTool.emit_sync) == "sync"
+    assert await protocol(LogTool.emit_async) == "async"
+    await protocol(Idle.log, str(fifo.path), "rmote-concurrency")
+    fifo.send()
+    await asyncio.to_thread(capture.wait, 3)
+    assert set(capture.messages) == {"sync record", "async record", "idle record"}
+    assert threading.get_ident() not in capture.threads
+    assert len(set(capture.threads)) == 1

@@ -5,10 +5,9 @@ import contextvars
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
-from types import AsyncGeneratorType
+from types import AsyncGeneratorType, SimpleNamespace
 
 import pytest
 
@@ -116,16 +115,25 @@ def test_cancel_running_request_runs_its_cleanup(runtime: _Runtime) -> None:
     assert runtime.run(lambda: asyncio.sleep(0, result=2)) == 2
 
 
-def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime) -> None:
+def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime, monkeypatch) -> None:
     entered = threading.Event()
     cleaned = threading.Event()
+    waiting = threading.Event()
+    release = asyncio.Event()
+    original = runtime._await_task
+
+    async def observe(future):
+        waiting.set()
+        await original(future)
+
+    monkeypatch.setattr(runtime, "_await_task", observe)
 
     async def wait() -> None:
         entered.set()
         try:
             await asyncio.Event().wait()
         finally:
-            await asyncio.sleep(0.05)
+            await release.wait()
             cleaned.set()
 
     future = runtime.submit(wait)
@@ -133,7 +141,16 @@ def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime) -> None
     assert future.cancel()
     # A caller that gave up still owns the operation, so wait() returns only
     # after the loop has finished with it.
-    runtime.wait(future)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiter = pool.submit(runtime.wait, future)
+        try:
+            assert waiting.wait(5)
+            assert not waiter.done()
+            assert not cleaned.is_set()
+        finally:
+            assert runtime._loop is not None
+            runtime._loop.call_soon_threadsafe(release.set)
+        waiter.result(5)
     assert cleaned.is_set()
 
 
@@ -143,17 +160,25 @@ def test_wait_on_a_finished_future_returns_at_once(runtime: _Runtime) -> None:
     runtime.wait(future)
 
 
-def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime) -> None:
+def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime, monkeypatch) -> None:
+    entered = threading.Event()
     cleaned = threading.Event()
 
     async def wait() -> None:
         try:
+            entered.set()
             await asyncio.Event().wait()
         finally:
             cleaned.set()
 
-    with pytest.raises(TimeoutError):
-        runtime.run(wait, timeout=0.05)
+    def expire(future, timeout=None):
+        assert entered.wait(5)
+        raise TimeoutError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "result", expire)
+        with pytest.raises(TimeoutError):
+            runtime.run(wait, timeout=1)
     assert cleaned.wait(5)
     assert runtime.run(lambda: asyncio.sleep(0, result=3)) == 3
 
@@ -229,10 +254,9 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from rmote._runtime import _Runtime
 
-SENDER = "import os, signal, sys, time; time.sleep(0.05); os.kill(int(sys.argv[1]), signal.SIGINT)"
+SENDER = "import os, signal, sys; sys.stdin.buffer.read(1); os.kill(int(sys.argv[1]), signal.SIGINT)"
 runtime = _Runtime()
 try:
     for attempt in range(6):
@@ -244,18 +268,33 @@ try:
 
         future = runtime.submit(wait)
         assert entered.wait(5)
-        sender = subprocess.Popen([sys.executable, "-c", SENDER, str(os.getpid())])
-        started = time.monotonic()
+        sender = subprocess.Popen([sys.executable, "-c", SENDER, str(os.getpid())], stdin=subprocess.PIPE)
+        gate = runtime._gates[future]
+
+        class SignalGate:
+            sent = False
+
+            def acquire(self, *args):
+                if not self.sent:
+                    self.sent = True
+                    sender.stdin.write(b"x")
+                    sender.stdin.flush()
+                return gate.acquire(*args)
+
+            def release(self):
+                gate.release()
+
+        runtime._gates[future] = SignalGate()
         try:
             runtime.result(future)
         except KeyboardInterrupt:
-            elapsed = time.monotonic() - started
-            assert elapsed < 2, f"attempt {attempt}: the interrupt needed {elapsed:.2f}s"
+            pass
         else:
             raise AssertionError(f"attempt {attempt}: no KeyboardInterrupt")
         finally:
             future.cancel()
-            sender.wait()
+            sender.stdin.close()
+            sender.wait(timeout=5)
     assert runtime.run(lambda: asyncio.sleep(0, result=5)) == 5
 finally:
     runtime.close()
@@ -266,22 +305,36 @@ print("every interrupt arrived")
     assert process.stdout.strip() == "every interrupt arrived"
 
 
-def test_result_respects_a_timeout_in_the_main_thread_and_in_a_worker(runtime: _Runtime) -> None:
-    """Both waits of result() end on time: the sliced one and the plain one."""
-    future = runtime.submit(lambda: asyncio.Event().wait())
+def test_result_spends_only_the_remaining_deadline(runtime: _Runtime, monkeypatch) -> None:
+    """Sliced waits consume a deadline; scheduling latency is irrelevant."""
+    now = 0.0
+    waits = []
+    future: Future[None] = Future()
+
+    class Gate:
+        def acquire(self, blocking, timeout):
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            return False
+
+    monkeypatch.setattr("rmote._runtime.time", SimpleNamespace(monotonic=lambda: now))
+    runtime._gates[future] = Gate()  # type: ignore[assignment]
     try:
-        started = time.monotonic()
         with pytest.raises(TimeoutError):
-            runtime.result(future, 0.1)
-        assert 0.05 < time.monotonic() - started < 2
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            started = time.monotonic()
-            with pytest.raises(TimeoutError):
-                pool.submit(runtime.result, future, 0.1).result(5)
-            assert 0.05 < time.monotonic() - started < 2
+            runtime.result(future, 0.125)
+        assert waits == pytest.approx([0.05, 0.05, 0.025])
+        assert not future.done()
     finally:
-        future.cancel()
-        runtime.wait(future, timeout=5)
+        runtime._gates.pop(future)
+
+
+def test_result_in_a_worker_respects_an_expired_deadline(runtime: _Runtime) -> None:
+    future: Future[None] = Future()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(TimeoutError):
+            pool.submit(runtime.result, future, 0).result(5)
+    assert not future.done()
 
 
 def test_interrupted_request_registration_does_not_block_close() -> None:
@@ -431,10 +484,20 @@ def test_close_finalizes_async_generators(runtime: _Runtime) -> None:
     assert value.ag_frame is None
 
 
-def test_close_waits_for_executor_work(runtime: _Runtime) -> None:
+def test_close_waits_for_executor_work(runtime: _Runtime, monkeypatch) -> None:
     entered = threading.Event()
     release = threading.Event()
     worker_finished = threading.Event()
+    shutdown_started = threading.Event()
+    assert runtime._loop is not None
+    shutdown = runtime._loop.shutdown_default_executor
+
+    async def observe_shutdown(*args, **kwargs):
+        shutdown_started.set()
+        await shutdown(*args, **kwargs)
+        assert worker_finished.is_set()
+
+    monkeypatch.setattr(runtime._loop, "shutdown_default_executor", observe_shutdown)
 
     def worker() -> None:
         entered.set()
@@ -447,8 +510,9 @@ def test_close_waits_for_executor_work(runtime: _Runtime) -> None:
         with ThreadPoolExecutor(max_workers=1) as closer:
             closing = closer.submit(runtime.close)
             try:
-                with pytest.raises(TimeoutError):
-                    closing.result(timeout=0.05)
+                assert shutdown_started.wait(5)
+                assert not closing.done()
+                assert not worker_finished.is_set()
             finally:
                 release.set()
             closing.result(timeout=5)

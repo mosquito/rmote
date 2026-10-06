@@ -20,7 +20,7 @@ class ErrorTool(Tool):
 class AsyncErrorTool(Tool):
     @staticmethod
     async def async_error() -> None:
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0)
         raise RuntimeError("Async error!")
 
 
@@ -54,7 +54,7 @@ class ThresholdTool(Tool):
 class ConcurrentTool(Tool):
     @staticmethod
     async def slow_double(value: int) -> int:
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         return value * 2
 
 
@@ -83,7 +83,7 @@ class MixedMethodsTool(Tool):
 
     @staticmethod
     async def async_method(value: int) -> int:
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         return value * 3
 
 

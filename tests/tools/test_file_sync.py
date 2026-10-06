@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import tempfile
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -12,6 +11,7 @@ import pytest
 
 from rmote.tools import FileSync
 from rmote.tools.file_sync import Batch, Session, SyncResult
+from tests.support.synchronization import ObservedLock
 
 
 @pytest.mark.asyncio
@@ -580,24 +580,40 @@ def test_steps_of_one_session_do_not_overlap(tmp_path, monkeypatch):
     source.write_bytes(b"content")
     FileSync._open("token", str(source), False, 4)
     active = 0
-    overlapped = False
+    maximum = 0
+    entered = threading.Event()
+    release = threading.Event()
+    state = threading.Lock()
+    session = FileSync._sessions["token"]
+    lock = ObservedLock(session.lock)
+    monkeypatch.setattr(session, "lock", lock)
 
     def counting(self, message=None):
-        nonlocal active, overlapped
-        active += 1
-        overlapped |= active > 1
-        time.sleep(0.05)
-        active -= 1
+        nonlocal active, maximum
+        with state:
+            active += 1
+            maximum = max(maximum, active)
+        entered.set()
+        assert release.wait(10)
+        with state:
+            active -= 1
         return Batch([], [])
 
     monkeypatch.setattr(Session, "step", counting)
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            for step in [pool.submit(FileSync._step, "token") for _ in range(4)]:
+            steps = [pool.submit(FileSync._step, "token") for _ in range(4)]
+            try:
+                lock.wait(4)
+                assert entered.wait(5)
+                assert active == 1
+            finally:
+                release.set()
+            for step in steps:
                 step.result(timeout=5)
     finally:
         FileSync._close("token")
-    assert not overlapped
+    assert maximum == 1
     assert not FileSync._sessions
 
 

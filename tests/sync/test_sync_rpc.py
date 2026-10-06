@@ -1,5 +1,5 @@
 import asyncio
-import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -7,15 +7,12 @@ from typing import Any
 import pytest
 
 from rmote.sync import Connection
+from tests.support.synchronization import wait_until
 from tests.sync.tools import Methods
 
 
 def wait_started(marker: Path) -> None:
-    deadline = time.monotonic() + 5
-    while not marker.exists():
-        if time.monotonic() >= deadline:
-            pytest.fail("Remote method did not start")
-        time.sleep(0.01)
+    wait_until(lambda: marker.exists() and marker.read_text() == "started")
 
 
 def pending(connection: Connection) -> int:
@@ -106,52 +103,69 @@ def test_remote_and_invalid_tool_errors():
         assert pending(connection) == 0
 
 
-def test_timeout_keeps_channel_and_remote_operation(tmp_path):
+def test_timeout_keeps_channel_and_remote_operation(tmp_path, deadline):
     marker = tmp_path / "operation"
-    with Connection.from_local(rpc_timeout=0.05) as connection:
+    timer = deadline("rmote.sync")
+    with Connection.from_local(rpc_timeout=timer.seconds) as connection:
         connection.call_with_timeout(5.0, Methods.echo, "warm up")
-        with pytest.raises(TimeoutError):
-            connection(Methods.pause, 0.2, str(marker))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            call = pool.submit(connection, Methods.pause, str(marker))
+            wait_started(marker)
+            timer.expire()
+            with pytest.raises(TimeoutError):
+                call.result(5)
         assert pending(connection) == 0
         assert marker.read_text() == "started"
         # Disabling the default deadline affects only this invocation.
         assert connection.call_with_timeout(None, Methods.echo, "after timeout") == "after timeout"
-        deadline = time.monotonic() + 5
-        while marker.read_text() != "finished":
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
+        connection.call_with_timeout(None, Methods.resume)
+        assert marker.read_text() == "finished"
         assert connection(Methods.echo, "after late response") == "after late response"
         assert pending(connection) == 0
 
 
-def test_first_tool_upload_uses_rpc_deadline(monkeypatch):
+def test_first_tool_upload_uses_rpc_deadline(monkeypatch, deadline):
+    timer = deadline("rmote.sync")
+    entered = threading.Event()
     with Connection.from_local() as connection:
         assert connection._protocol is not None
         original = connection._protocol._call
 
         async def delayed(*args: Any, **kwargs: Any) -> Any:
-            await asyncio.sleep(0.2)
+            entered.set()
+            await asyncio.Event().wait()
             return await original(*args, **kwargs)
 
         monkeypatch.setattr(connection._protocol, "_call", delayed)
-        with pytest.raises(TimeoutError):
-            connection.call_with_timeout(0.01, Methods.echo, "not uploaded")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            call = pool.submit(connection.call_with_timeout, timer.seconds, Methods.echo, "not uploaded")
+            assert entered.wait(5)
+            timer.expire()
+            with pytest.raises(TimeoutError):
+                call.result(5)
         assert pending(connection) == 0
         monkeypatch.setattr(connection._protocol, "_call", original)
         assert connection(Methods.echo, "retry upload") == "retry upload"
 
 
-def test_timeout_during_send_closes_channel(monkeypatch):
+def test_timeout_during_send_closes_channel(monkeypatch, deadline):
+    timer = deadline("rmote.sync")
+    entered = threading.Event()
     with Connection.from_local() as connection:
         connection(Methods.echo, "warm up")
         assert connection._protocol is not None
 
         async def blocked_drain() -> None:
-            await asyncio.sleep(60)
+            entered.set()
+            await asyncio.Event().wait()
 
         monkeypatch.setattr(connection._protocol.writer, "drain", blocked_drain)
-        with pytest.raises(TimeoutError):
-            connection.call_with_timeout(0.02, Methods.echo, "cancel after write")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            call = pool.submit(connection.call_with_timeout, timer.seconds, Methods.echo, "cancel after write")
+            assert entered.wait(5)
+            timer.expire()
+            with pytest.raises(TimeoutError):
+                call.result(5)
         assert pending(connection) == 0
         with pytest.raises(ConnectionError):
             connection(Methods.echo, "damaged channel")
@@ -161,25 +175,20 @@ def test_keyboard_interrupt_waits_for_local_cleanup(tmp_path, monkeypatch):
     marker = tmp_path / "interrupted"
     with Connection.from_local() as connection:
         connection(Methods.echo, "warm up")
-        original = connection._runtime.submit
+        original = connection._runtime.result
         interrupted = False
 
-        def submit(factory):
+        def result(future, timeout=None):
             nonlocal interrupted
-            future = original(factory)
             if not interrupted:
                 interrupted = True
+                wait_started(marker)
+                raise KeyboardInterrupt
+            return original(future, timeout)
 
-                def interrupt(timeout=None):
-                    wait_started(marker)
-                    raise KeyboardInterrupt
-
-                monkeypatch.setattr(future, "result", interrupt)
-            return future
-
-        monkeypatch.setattr(connection._runtime, "submit", submit)
+        monkeypatch.setattr(connection._runtime, "result", result)
         with pytest.raises(KeyboardInterrupt):
-            connection(Methods.pause, 0.2, str(marker))
+            connection(Methods.pause, str(marker))
         assert pending(connection) == 0
         assert connection(Methods.echo, "after interrupt") == "after interrupt"
 
@@ -189,7 +198,7 @@ def test_close_finishes_waiting_call_and_rejects_new_calls(tmp_path):
     connection = Connection.from_local()
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(connection, Methods.pause, 60.0, str(marker))
+            future = pool.submit(connection, Methods.pause, str(marker))
             wait_started(marker)
             connection.close()
             with pytest.raises(ConnectionError):

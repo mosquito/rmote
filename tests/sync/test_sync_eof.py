@@ -58,6 +58,6 @@ def test_rpc_waiting_during_eof_preserves_transport_error(monkeypatch, tmp_path)
 
         monkeypatch.setattr(protocol, "send", disconnect_after_request)
         with pytest.raises(asyncio.IncompleteReadError):
-            connection(Methods.pause, 5.0, str(tmp_path / "started"))
+            connection(Methods.pause, str(tmp_path / "started"))
     assert not connection._runtime._thread.is_alive()
     assert process.returncode is not None

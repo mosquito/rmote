@@ -27,6 +27,14 @@ class Payload:
 active = 0
 maximum = 0
 calls = 0
+barrier: asyncio.Barrier | None = None
+
+
+class Coordination(Tool):
+    @staticmethod
+    async def expect(concurrency: int) -> None:
+        global barrier
+        barrier = asyncio.Barrier(concurrency)
 
 
 async def overlapping() -> OverlapInfo:
@@ -34,7 +42,8 @@ async def overlapping() -> OverlapInfo:
     active += 1
     maximum = max(maximum, active)
     try:
-        await asyncio.sleep(0.05)
+        if barrier is not None:
+            await barrier.wait()
         return OverlapInfo(maximum, os.getpid())
     finally:
         active -= 1

@@ -24,15 +24,13 @@ def drive_shell(
     script: bytes,
     size: tuple[int, int] = (24, 80),
     env: dict[str, str] | None = None,
-    ready_marker: bytes = b"",
+    ready_marker: bytes = b"RMOTE_SHELL_READY> ",
 ) -> tuple[int, bytes]:
     """Run rmote shell behind a terminal, feed *script*, collect the output.
 
     The client needs a real terminal to enter raw mode, so the test owns the
     master side and the client gets the slave side as its standard descriptors.
-    The script is sent after the first output, because the client forwards input
-    only once the session is open. With *ready_marker*, wait for that output
-    instead so a child can finish preparing before it receives input.
+    The script is sent after the shell prompt or the child's explicit marker.
     """
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
@@ -40,6 +38,7 @@ def drive_shell(
     child_env = dict(os.environ)
     child_env.setdefault("SHELL", "/bin/sh")
     child_env["TERM"] = "xterm"
+    child_env["PS1"] = "RMOTE_SHELL_READY> "
     if env:
         child_env.update(env)
 
@@ -55,7 +54,6 @@ def drive_shell(
     out = bytearray()
     pending = script
     deadline = time.monotonic() + DRIVE_TIMEOUT
-    send_deadline = time.monotonic() + 10
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master_fd], [], [], 0.5)
@@ -70,11 +68,6 @@ def drive_shell(
                 if pending and ready_marker in out:
                     os.write(master_fd, pending)
                     pending = b""
-                continue
-            if pending and time.monotonic() > send_deadline:
-                assert ready_marker in out, bytes(out)
-                os.write(master_fd, pending)
-                pending = b""
                 continue
             if process.poll() is not None:
                 break

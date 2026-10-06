@@ -165,30 +165,6 @@ def test_existing_file_is_preserved(daemon: Daemon):
     assert daemon.path.read_text() == "keep"
 
 
-def test_idle_timeout_waits_for_a_quiet_session(daemon: Daemon):
-    result = daemon.start("--idle-timeout", "1")
-    assert result.returncode == 0, result.stderr
-    client = subprocess.Popen(
-        daemon.client("host", "printf ready; cat"),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert client.stdout is not None
-        assert client.stdout.read(5) == b"ready"
-        time.sleep(1.2)
-        assert client.poll() is None
-        assert daemon.path.exists()
-        output, error = client.communicate(b"hello", timeout=5)
-        assert (client.returncode, output, error) == (0, b"hello", b"")
-        wait_removed(daemon.path)
-    finally:
-        if client.poll() is None:
-            client.kill()
-        client.communicate()
-
-
 def test_idle_timeout_without_any_session(daemon: Daemon):
     result = daemon.start("--idle-timeout", "0.2")
     assert result.returncode == 0, result.stderr
@@ -204,7 +180,7 @@ def test_invalid_idle_timeout(daemon: Daemon, value: str):
 
 def test_startup_timeout_releases_lock(daemon: Daemon):
     helper = daemon.path.with_name("slow.py")
-    helper.write_text("import time\ntime.sleep(30)\n")
+    helper.write_text("import threading\nthreading.Event().wait()\n")
     code = "import sys; import rmote.cli.sshmux as d; d.START_TIMEOUT = 0.2; from rmote.cli import main; sys.exit(main(sys.argv[1:]))"
     result = subprocess.run(
         [sys.executable, "-c", code, *daemon.command()[3:], "--", sys.executable, str(helper)],

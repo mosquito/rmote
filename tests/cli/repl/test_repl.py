@@ -125,7 +125,7 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
         "    @staticmethod\n"
         "    async def wait():\n"
         "        import asyncio\n"
-        "        await asyncio.sleep(60)\n"
+        "        await asyncio.Event().wait()\n"
     )
     assert b"Traceback" not in output
     output = session.send(f"print('PID', {prefix}remote(Probe.pid))")
@@ -136,7 +136,7 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
     if asynchronous:
         session.send("async def twice():\n    return await remote(Probe.pid)\n")
         assert str(pid).encode() in session.send("await twice()")
-        session.send("task = asyncio.create_task(asyncio.sleep(0.01, result=123))")
+        session.send("task = asyncio.create_task(asyncio.sleep(0, result=123))")
         # Reading the next line must leave the protocol event loop running.
         assert b"123" in session.send("await task")
     os.write(session.master, f"print('WAITING', flush=True); {prefix}remote(Probe.wait)\n".encode())
