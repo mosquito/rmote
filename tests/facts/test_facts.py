@@ -3,8 +3,8 @@
 import asyncio
 import os
 import sys
-import time
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -14,6 +14,7 @@ from rmote.tools import facts
 from rmote.tools.facts.schema import FactsData
 from tests.facts.tools import (
     BrokenFacts,
+    Coordination,
     CounterFacts,
     CounterInfo,
     FirstFacts,
@@ -66,6 +67,7 @@ async def test_real_gather_explicit_save_offline_load(protocol, cache):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("concurrency", [1, 2])
 async def test_custom_collectors_transferred_and_run_on_remote(protocol, concurrency):
+    await protocol(Coordination.expect, concurrency)
     result = cast(
         ProjectFactsData,
         await facts.fetch(protocol, collectors=[FirstFacts, SecondFacts], concurrency=concurrency),
@@ -88,7 +90,8 @@ async def test_gather_in_clean_container(docker_protocol, cache):
 
 
 @pytest.mark.asyncio
-async def test_cache_ttl_versions_hosts_and_explicit_refresh(protocol, cache):
+async def test_cache_ttl_versions_hosts_and_explicit_refresh(protocol, cache, monkeypatch):
+    monkeypatch.setattr("rmote.cache.time", SimpleNamespace(time=lambda: 1000.0))
     local = Cache[Any](versions={c.key: c.version for c in (CounterFacts,)})
     assert local.stale() == ("counter",)
     local.update(await facts.fetch(protocol, collectors=[CounterFacts]))
@@ -101,12 +104,12 @@ async def test_cache_ttl_versions_hosts_and_explicit_refresh(protocol, cache):
     assert await cache.get("b", "counter") is None
     local.update(await facts.fetch(protocol, collectors=[CounterFacts]))
     assert cast(ProjectFactsData, local.data)["counter"].calls == 2
-    await cache.set("expired", "counter", CacheEntry(CounterInfo(40), time.time() - 1000))
+    await cache.set("expired", "counter", CacheEntry(CounterInfo(40), 0.0))
     expired = Cache[Any](versions={c.key: c.version for c in (CounterFacts,)})
     await expired.load(cache, namespace="expired")
     assert expired.stale(max_age=None) == ()
     assert expired.stale(max_age=10) == ("counter",)
-    await cache.set("version", "counter", CacheEntry(CounterInfo(50), time.time(), 2))
+    await cache.set("version", "counter", CacheEntry(CounterInfo(50), 1000.0, 2))
     incompatible = Cache[Any](versions={c.key: c.version for c in (CounterFacts,)})
     await incompatible.load(cache, namespace="version")
     assert incompatible.data == {}
@@ -239,13 +242,15 @@ async def test_one_failure_cancels_the_other_calls():
     """A failing branch must not leave its neighbours running."""
     running = 0
     cancelled = 0
+    entered = asyncio.Event()
 
     async def remote(method):
         nonlocal running, cancelled
         if method is BrokenFacts.collect:
-            await asyncio.sleep(0)
+            await entered.wait()
             raise RuntimeError("collector failed")
         running += 1
+        entered.set()
         try:
             await asyncio.Future()
         except asyncio.CancelledError:

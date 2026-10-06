@@ -221,6 +221,35 @@ class TestResourceOwnership:
     """
 
     @pytest.mark.asyncio
+    async def test_output_survives_the_child_closing_its_descriptors(self, fifo) -> None:
+        script = (
+            "import os, sys; "
+            "os.write(1, b'LAST_OUTPUT\\n'); os.closerange(0, 3); "
+            "ready = os.open(sys.argv[1], os.O_WRONLY); "
+            "os.write(ready, b'x'); os.close(ready); sys.exit(7)"
+        )
+        before = open_descriptors()
+        key = await Vty.open([sys.executable, "-c", script, str(fifo.path)], launcher=launcher_source())
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                # Do not read until the child has closed every slave copy.
+                # On macOS, the last close would discard its unread output.
+                assert await asyncio.to_thread(fifo.receive) == b"x"
+                output = b"".join([chunk async for chunk in Vty.output(key)])
+                assert output == b"LAST_OUTPUT\r\n"
+                assert await Vty.wait(key) == 7
+        finally:
+            await Vty.close(key)
+        assert open_descriptors() == before
+
+    @pytest.mark.asyncio
+    async def test_close_without_reading_releases_the_terminal(self) -> None:
+        before = open_descriptors()
+        key = await Vty.open(["/bin/sh", "-c", "printf unread"], launcher=launcher_source())
+        await Vty.close(key)
+        assert open_descriptors() == before
+
+    @pytest.mark.asyncio
     async def test_a_failed_start_releases_the_terminal(self, tmp_path) -> None:
         missing = str(tmp_path / "missing-directory")
         before = open_descriptors()
@@ -285,17 +314,26 @@ class TestWritesThatCannotFinish:
     @pytest.mark.asyncio
     async def test_other_calls_run_while_a_write_waits(self, protocol: Protocol) -> None:
         """A full pipe must not stop the remote event loop."""
-        key = await protocol(Vty.open, ["/bin/sh", "-c", "sleep 30"], want_pty=False)
+        from tests.support.tool_cases.vty_probe import VtyProbe
+
+        key = await protocol(
+            Vty.open, [sys.executable, "-c", "import threading; threading.Event().wait()"], want_pty=False
+        )
+        await protocol(VtyProbe.watch, key)
+        writer = None
         try:
             # More than one pipe buffer, and the child never reads.
             writer = asyncio.ensure_future(protocol(Vty.write, key, b"x" * 1_000_000))
-            await asyncio.sleep(0.2)
+            await protocol(VtyProbe.wait)
             assert not writer.done()
 
             # Another call still goes through and comes back.
             await asyncio.wait_for(protocol(Vty.resize, key, 20, 60), TIMEOUT)
             writer.cancel()
         finally:
+            if writer is not None:
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
             assert await protocol(Vty.close, key) != 0
 
 

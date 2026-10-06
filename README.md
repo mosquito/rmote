@@ -18,13 +18,20 @@ Install rmote on your local machine. The target needs Python 3.11 or newer,
 but no rmote installation or agent. Tool code is sent when it is first used
 on a connection.
 
+To connect without a remote agent, rmote launches standard `python3 -qui` on the target:
+
+- `-q` (**quiet**): suppresses Python's startup banner and copyright messages.
+- `-u` (**unbuffered**): forces unbuffered binary stdout/stderr so protocol frames flush immediately.
+- `-i` (**interactive**): reads and executes statements from stdin even without a TTY.
+
 ## Install
 
 ```bash
 python -m pip install rmote
 ```
 
-Python 3.11 or newer is required locally too. Package and service tools also
+Python 3.11 or newer is required locally too. Free-threaded builds work on
+both sides, and the tests cover 3.13t and 3.14t. Package and service tools also
 need the target's system commands and sufficient permissions. rmote does not
 install tool dependencies or elevate privileges automatically.
 

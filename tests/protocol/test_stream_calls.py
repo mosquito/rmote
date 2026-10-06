@@ -9,14 +9,15 @@ import asyncio
 import contextlib
 import pickle
 import sys
-import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from rmote.protocol import Flags, Protocol, StreamCredit, Tool
+from rmote.protocol import Flags, Protocol, StreamCredit
+from tests.support.synchronization import ObservedEvent, wait_blocked
+from tests.support.tool_cases.streaming import Streamer, Waiting
 
 
 class Counting(Protocol):
@@ -33,61 +34,6 @@ class Counting(Protocol):
             self.packets += 1
             self.items += len(packet.payload) if packet.flags & Flags.BATCH else 1
         return packet
-
-
-class Streamer(Tool):
-    gate: asyncio.Event
-
-    @classmethod
-    async def gated(cls) -> AsyncIterator[int]:
-        cls.gate = asyncio.Event()
-        yield 0
-        await cls.gate.wait()
-        yield 1
-
-    @classmethod
-    async def release(cls) -> None:
-        cls.gate.set()
-
-    @staticmethod
-    async def counted(count: int) -> AsyncIterator[int]:
-        for number in range(count):
-            yield number
-
-    @staticmethod
-    async def chunks(count: int, size: int) -> AsyncIterator[bytes]:
-        for number in range(count):
-            yield bytes((number % 251,)) * size
-
-    @staticmethod
-    async def slowly(count: int, delay: float) -> AsyncIterator[int]:
-        for number in range(count):
-            await asyncio.sleep(delay)
-            yield number
-
-    @staticmethod
-    async def failing() -> AsyncIterator[str]:
-        yield "first"
-        raise RuntimeError("generator failed")
-
-    @staticmethod
-    async def compressible(count: int, size: int) -> AsyncIterator[bytes]:
-        for _ in range(count):
-            yield b"a" * size
-
-    @staticmethod
-    async def blocks(path: str, size: int) -> AsyncIterator[bytes]:
-        """Yield a file in bounded blocks, as a file tool would."""
-        with open(path, "rb") as handle:
-            while True:
-                block = handle.read(size)
-                if not block:
-                    return
-                yield block
-
-    @staticmethod
-    def add(left: int, right: int) -> int:
-        return left + right
 
 
 class TestStreamingCalls:
@@ -165,7 +111,7 @@ class TestStreamingCalls:
     @pytest.mark.asyncio
     async def test_two_streams_run_at_once(self, protocol: Protocol) -> None:
         async def collect(count: int) -> list[int]:
-            return [item async for item in protocol(Streamer.slowly, count, 0.01)]
+            return [item async for item in protocol(Streamer.paired, count)]
 
         first, second = await asyncio.gather(collect(10), collect(10))
 
@@ -173,22 +119,42 @@ class TestStreamingCalls:
         assert second == list(range(10))
 
     @pytest.mark.asyncio
-    async def test_a_slow_consumer_slows_the_sender(self, protocol: Protocol) -> None:
+    async def test_a_slow_consumer_slows_the_sender(self, client, monkeypatch) -> None:
         """Permission bounds the items in flight, so memory stays bounded.
 
         The sender stops by itself while nothing is consumed, and every item
         still arrives once reading continues.
         """
-        total = protocol.MAX_STREAM_BACKLOG * 4
-        items = protocol(Streamer.counted, total)
-        assert await items.__anext__() == 0
+        credit = StreamCredit(max_bytes=1_000_000, max_items=2)
+        credit.ready = ready = ObservedEvent()
+        monkeypatch.setattr("rmote.protocol.StreamCredit", lambda *args: credit)
+        produced = []
+        received = []
 
-        # Nothing is consumed for a while.
-        await asyncio.sleep(1.0)
-        queue = next(iter(protocol.streams.values()))
-        assert queue.qsize() <= protocol.MAX_STREAM_BACKLOG + 1
+        async def produce() -> AsyncIterator[int]:
+            for number in range(7):
+                produced.append(number)
+                yield number
 
-        assert [item async for item in items] == list(range(1, total))
+        async def collect(payload, flags, packet_id):
+            received.extend(Protocol.split(payload) if flags & Flags.BATCH else [pickle.loads(payload)])
+
+        monkeypatch.setattr(client, "send_serialized", collect)
+        sending = asyncio.create_task(client.send_stream(produce(), 1))
+        try:
+            for blocked_at in (3, 5, 7):
+                await wait_blocked(sending, ready.entered)
+                # Two items per credit grant, plus one read ahead.
+                assert produced == list(range(blocked_at))
+                assert credit.items_in_flight == 2
+                assert not sending.done()
+                ready.entered.clear()
+                credit.give_back(credit.bytes_in_flight, 2)
+            await sending
+            assert received == list(range(7))
+        finally:
+            sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
 
     def test_a_peer_that_ignores_permission_ends_the_stream(self) -> None:
         """The receive side keeps a last defence against a faulty peer.
@@ -246,8 +212,6 @@ class TestStreamingCalls:
     async def test_stream_is_not_started_before_it_is_read(self, protocol: Protocol) -> None:
         """An async generator is lazy, so no request goes out on its own."""
         items = protocol.stream(Streamer.counted, 5)
-        await asyncio.sleep(0.1)
-
         assert protocol.streams == {}
         assert await items.__anext__() == 0
         await items.aclose()
@@ -260,7 +224,7 @@ class TestStreamingAfterDisconnect:
 
         proto = await Protocol.from_command(python=sys.executable)
         async with proto:
-            items = proto(Streamer.slowly, 1000, 0.05)
+            items = proto(Streamer.gated)
             assert await items.__anext__() == 0
 
             assert proto._owned_process is not None
@@ -340,10 +304,11 @@ class TestCreditAccounting:
     @pytest.mark.asyncio
     async def test_release_stops_a_waiting_sender(self) -> None:
         credit = StreamCredit(max_bytes=10, max_items=10)
+        credit.ready = ready = ObservedEvent()
         await credit.spend(10)
 
         waiting = asyncio.ensure_future(credit.spend(10))
-        await asyncio.sleep(0.05)
+        await wait_blocked(waiting, ready.entered)
         assert not waiting.done()
 
         credit.release()
@@ -414,12 +379,14 @@ class TestFlowControlUnderLoad:
 
     @pytest.mark.asyncio
     async def test_cancelling_the_consumer_releases_the_stream(self, protocol: Protocol) -> None:
+        received = asyncio.Event()
+
         async def read_forever() -> None:
-            async for _ in protocol(Streamer.slowly, 10_000, 0.01):
-                pass
+            async for _ in protocol(Streamer.gated):
+                received.set()
 
         task = asyncio.ensure_future(read_forever())
-        await asyncio.sleep(0.2)
+        await received.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -427,8 +394,8 @@ class TestFlowControlUnderLoad:
         assert await protocol(Streamer.add, 5, 5) == 10
 
     @pytest.mark.asyncio
-    async def test_file_blocks_reach_a_slow_writer(self, protocol: Protocol, tmp_path: Path) -> None:
-        """A file tool yields bounded blocks and the writer is slower."""
+    async def test_file_blocks_reach_the_writer(self, protocol: Protocol, tmp_path: Path) -> None:
+        """A file tool yields bounded blocks without losing data."""
         source = tmp_path / "source.bin"
         payload = bytes(range(256)) * 4000
         source.write_bytes(payload)
@@ -437,7 +404,6 @@ class TestFlowControlUnderLoad:
         with target.open("wb") as handle:
             async for block in protocol(Streamer.blocks, str(source), 64 * 1024):
                 handle.write(block)
-                await asyncio.sleep(0.02)
 
         assert target.read_bytes() == payload
 
@@ -480,28 +446,6 @@ class TestBatches:
             Protocol.split(payload)
 
 
-class Waiting(Tool):
-    """A streaming method that waits for data it never receives."""
-
-    @staticmethod
-    async def forever(marker: str) -> AsyncIterator[int]:
-        """Yield once, then wait. The cleanup writes *marker* as its proof."""
-        from pathlib import Path
-
-        try:
-            yield 1
-            await asyncio.Event().wait()
-        finally:
-            Path(marker).write_text("closed")
-
-    @staticmethod
-    def cleaned(marker: str) -> bool:
-        """Report whether the cleanup of the generator has run."""
-        from pathlib import Path
-
-        return Path(marker).exists()
-
-
 class TestLeavingAWaitingStream:
     @pytest.mark.asyncio
     async def test_the_cleanup_of_a_waiting_generator_runs(self, protocol: Protocol, tmp_path: Path) -> None:
@@ -510,9 +454,7 @@ class TestLeavingAWaitingStream:
         async with contextlib.aclosing(protocol(Waiting.forever, marker)) as items:
             assert await items.__anext__() == 1
 
-        deadline = time.monotonic() + 5
-        while not await protocol(Waiting.cleaned, marker) and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
+        await protocol(Waiting.wait_closed)
         assert await protocol(Waiting.cleaned, marker)
         # The connection is intact, so an ordinary call still answers.
         assert await protocol(Streamer.add, 2, 3) == 5
@@ -524,20 +466,20 @@ class TestLeavingAWaitingStream:
         async for _ in protocol(Waiting.forever, marker):
             break
 
-        deadline = time.monotonic() + 5
-        while not await protocol(Waiting.cleaned, marker) and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
+        await protocol(Waiting.wait_closed)
         assert await protocol(Waiting.cleaned, marker)
 
     @pytest.mark.asyncio
     async def test_other_streams_keep_running(self, protocol: Protocol, tmp_path: Path) -> None:
         """Cancelling one producer leaves the connection and its streams alone."""
         marker = str(tmp_path / "closed")
-        other = protocol(Streamer.slowly, 6, 0.01)
+        other = protocol(Streamer.gated)
         assert await other.__anext__() == 0
 
         async with contextlib.aclosing(protocol(Waiting.forever, marker)) as items:
             assert await items.__anext__() == 1
 
-        assert [item async for item in other] == list(range(1, 6))
+        await protocol(Waiting.wait_closed)
+        await protocol(Streamer.release)
+        assert [item async for item in other] == [1]
         assert await protocol(Waiting.cleaned, marker)

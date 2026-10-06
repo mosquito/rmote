@@ -185,15 +185,23 @@ class TestBootstrapPacker:
 
 class TestHighLevelProtocolEdgeCases:
     @pytest.mark.asyncio
-    async def test_protocol_context_manager_cleanup(self, protocol: Protocol) -> None:
+    async def test_protocol_context_manager_cleanup(self, fifo) -> None:
         class SlowTool(Tool):
             @staticmethod
-            async def slow() -> str:
-                await asyncio.sleep(0.1)
-                return "done"
+            async def slow(path: str) -> None:
+                import asyncio
 
-        _task = asyncio.create_task(protocol(SlowTool.slow))  # noqa: F841
-        # exiting the protocol context (handled by fixture) cancels pending tasks
+                with open(path, "wb", buffering=0) as ready:
+                    ready.write(b"x")
+                await asyncio.Event().wait()
+
+        async with await Protocol.from_command(python=sys.executable) as protocol:
+            task = asyncio.create_task(protocol(SlowTool.slow, str(fifo.path)))
+            assert await asyncio.to_thread(fifo.receive) == b"x"
+            assert not task.done()
+        with pytest.raises(ConnectionError):
+            await task
+        assert not protocol.futures
 
     @pytest.mark.asyncio
     async def test_call_non_tool_method_raises(self, protocol: Protocol) -> None:

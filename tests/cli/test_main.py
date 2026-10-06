@@ -59,7 +59,9 @@ def cli(request: pytest.FixtureRequest) -> list[str]:
 def test_shell_dispatch_preserves_bytes_transport_and_exit_status(
     cli: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PYTHONASYNCIODEBUG", "1")
+    # Check normal CLI output, independent of the parent test runner's timing
+    # diagnostics. Debug-mode process cleanup is covered by protocol tests.
+    monkeypatch.delenv("PYTHONASYNCIODEBUG", raising=False)
     payload = bytes(range(256))
     result = subprocess.run(
         [

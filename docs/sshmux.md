@@ -103,6 +103,53 @@ ssh -F /dev/null -S ~/.ssh/container.sock -O check container
 ssh -F /dev/null -S ~/.ssh/container.sock -O exit container
 ```
 
+## One rule for a family of hosts
+
+`ControlPath` and `Match exec` both expand SSH's tokens: `%%`, `%C`, `%d`,
+`%h`, `%i`, `%j`, `%k`, `%L`, `%l`, `%n`, `%p`, `%r` and `%u`. The `exec`
+command runs under your shell, so a shell expansion can change a token after
+SSH substitutes it. One rule therefore serves a whole family of aliases, and
+every alias gets a server of its own:
+
+```text
+Host *.docker
+    ControlPath %d/.ssh/rmote-%C.sock
+    ControlMaster no
+    ProxyCommand false
+    ForwardAgent no
+    ForwardX11 no
+
+Match originalhost *.docker exec "n=%n; rmote sshmux --daemon --idle-timeout 300 --socket %d/.ssh/rmote-%C.sock -- docker exec -i ${n%%.docker}"
+Match all
+```
+
+`ssh my-container.docker` reaches the container `my-container`: SSH replaces
+`%n` with the alias, and the shell removes the `.docker` suffix. Another alias
+starts another server through the same rule.
+
+```bash
+ssh my-container.docker uname -s
+ssh other-container.docker 'cat /etc/hostname'
+```
+
+Write `%%` for the percent sign that the shell needs. SSH reads `%` as the
+start of a token and stops with `unknown key %.` for a single one. It gives
+the shell `${n%.docker}` after it replaces `%%` with `%`.
+
+Build the socket path from `%C`, a hash of `%l%h%p%r%j`. It is short, it
+differs for every host, and SSH gives `ControlPath` and the `exec` command the
+same value. A directory and a host name together pass the 104-byte limit of a
+UNIX socket path, and both rmote and SSH then report the length and refuse.
+
+Name the home directory with `%d`, not with `~`. SSH expands `~` from the
+account's passwd entry, and the shell of the `exec` command expands it from
+`$HOME`. Where those differ, the server listens on one socket and the client
+looks for another.
+
+`%n` is the alias from the command line, and it reaches the shell of the
+`exec` command without quoting. An alias that contains shell characters runs
+them, so use this form for aliases that you write yourself.
+
 ## Transport and destination
 
 The connection to the target uses rmote's common {doc}`transports`. SSH is the

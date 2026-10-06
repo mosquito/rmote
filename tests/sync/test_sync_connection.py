@@ -78,12 +78,18 @@ def fake_interpreter(tmp_path: Path, script: str) -> str:
     return str(path)
 
 
-def record_processes(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.subprocess.Process]:
+def record_processes(
+    monkeypatch: pytest.MonkeyPatch, *, pause_stderr: bool = False
+) -> list[asyncio.subprocess.Process]:
     processes: list[asyncio.subprocess.Process] = []
     original = asyncio.create_subprocess_exec
 
     async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
         process = await original(*args, **kwargs)
+        if pause_stderr:
+            pipe = process._transport.get_pipe_transport(2)  # type: ignore[attr-defined]
+            pipe.pause_reading()
+            assert not pipe.is_reading()
         processes.append(process)
         return process
 
@@ -102,22 +108,40 @@ def test_eof_before_handshake_reaps_process(tmp_path, monkeypatch):
     assert set(threading.enumerate()) == threads
 
 
-def test_handshake_timeout_drains_stderr_and_kills_stubborn_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pause_stderr", [False, True], ids=["reading", "paused"])
+def test_handshake_timeout_closes_pipes_and_kills_stubborn_process(
+    tmp_path, monkeypatch, deadline, fifo, pause_stderr
+):
+    timer = deadline("rmote.sync")
     executable = fake_interpreter(
         tmp_path,
         (
-            "import os, signal, time\n"
+            "import os, signal, threading\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "os.write(2, b'x' * 1048576)\n"
-            "time.sleep(60)\n"
+            f"with open({str(fifo.path)!r}, 'wb', buffering=0) as ready: ready.write(b'x')\n"
+            "try: os.write(2, b'x' * 1048576)\n"
+            "except BrokenPipeError: pass\n"
+            "threading.Event().wait()\n"
         ),
     )
-    processes = record_processes(monkeypatch)
+    processes = record_processes(monkeypatch, pause_stderr=pause_stderr)
     threads = set(threading.enumerate())
-    with pytest.raises(TimeoutError):
-        # Allow interpreter startup under load before testing SIGKILL escalation.
-        Connection.from_local(python=executable, stderr=subprocess.PIPE, connect_timeout=5.0, close_timeout=0.1)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        start = pool.submit(
+            Connection.from_local,
+            python=executable,
+            stderr=subprocess.PIPE,
+            connect_timeout=timer.seconds,
+            close_timeout=0.1,
+        )
+        assert fifo.receive() == b"x"
+        timer.expire()
+        with pytest.raises(TimeoutError):
+            start.result(5)
     assert processes[0].returncode == -signal.SIGKILL
+    transport = processes[0]._transport  # type: ignore[attr-defined]
+    assert transport.is_closing()
+    assert all(transport.get_pipe_transport(fd).is_closing() for fd in (0, 1, 2))
     assert set(threading.enumerate()) == threads
 
 
@@ -202,20 +226,34 @@ def test_body_exception_survives_cleanup_error(monkeypatch):
         connection.__exit__(None, None, None)
 
 
-def test_timeout_during_process_creation_recovers_process(monkeypatch):
+def test_timeout_during_process_creation_recovers_process(monkeypatch, deadline):
+    timer = deadline("rmote.sync")
     original = asyncio.create_subprocess_exec
+    original_close = Connection._close_async
     processes = []
+    spawned = threading.Event()
+    release = asyncio.Event()
 
     async def slow_create(*args, **kwargs):
         process = await original(*args, **kwargs)
         processes.append(process)
-        await asyncio.sleep(0.1)
+        spawned.set()
+        await release.wait()
         return process
 
+    async def close(self):
+        release.set()
+        await original_close(self)
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_create)
+    monkeypatch.setattr(Connection, "_close_async", close)
     threads = set(threading.enumerate())
-    with pytest.raises(TimeoutError):
-        Connection.from_local(connect_timeout=0.02, close_timeout=0.1)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        start = pool.submit(Connection.from_local, connect_timeout=timer.seconds, close_timeout=0.1)
+        assert spawned.wait(5)
+        timer.expire()
+        with pytest.raises(TimeoutError):
+            start.result(5)
     assert len(processes) == 1
     assert processes[0].returncode is not None
     assert set(threading.enumerate()) == threads
@@ -224,7 +262,7 @@ def test_timeout_during_process_creation_recovers_process(monkeypatch):
 def test_keyboard_interrupt_during_handshake_recovers_process(tmp_path, monkeypatch):
     from rmote._runtime import _Runtime
 
-    executable = fake_interpreter(tmp_path, "import time\ntime.sleep(60)\n")
+    executable = fake_interpreter(tmp_path, "import threading\nthreading.Event().wait()\n")
     original_run = _Runtime.run
     spawned = threading.Event()
     original_spawn = asyncio.create_subprocess_exec

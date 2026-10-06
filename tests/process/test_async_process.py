@@ -53,75 +53,85 @@ async def test_invalid_arguments():
 
 
 @pytest.mark.asyncio
-async def test_timeout_reaps_child_and_preserves_partial_output():
-    with pytest.raises(subprocess.TimeoutExpired) as error:
-        await async_process(
-            sys.executable,
-            "-c",
-            "import os,time,subprocess,sys; "
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-            "print(os.getpid(), flush=True); time.sleep(60)",
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-    assert isinstance(error.value.output, bytes)
-    pid = int(error.value.output)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-
-
-@pytest.mark.asyncio
-async def test_cancellation_reaps_child(tmp_path):
-    ready = tmp_path / "pid"
+async def test_timeout_reaps_child_and_preserves_partial_output(deadline, fifo):
+    timer = deadline("rmote.process")
     task = asyncio.create_task(
         async_process(
             sys.executable,
             "-c",
-            "import os,time,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)",
-            str(ready),
+            "import os,threading,subprocess,sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import threading; threading.Event().wait()']); "
+            "print(os.getpid(), flush=True); "
+            "open(sys.argv[1], 'wb', buffering=0).write(b'x'); threading.Event().wait()",
+            str(fifo.path),
+            capture_output=True,
+            text=True,
+            timeout=timer.seconds,
         )
     )
     try:
-        async with asyncio.timeout(5):
-            while not ready.exists() or not ready.read_text():
-                await asyncio.sleep(0.01)
-        pid = int(ready.read_text())
+        assert await asyncio.to_thread(fifo.receive) == b"x"
+        assert await asyncio.to_thread(timer.entered.wait, 10)
+        timer.expire()
+        with pytest.raises(subprocess.TimeoutExpired) as error:
+            await task
+        assert isinstance(error.value.output, bytes)
+        pid = int(error.value.output)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_reaps_child(fifo):
+    task = asyncio.create_task(
+        async_process(
+            sys.executable,
+            "-c",
+            "import os,threading,sys; "
+            "open(sys.argv[1], 'wb', buffering=0).write(str(os.getpid()).encode()); threading.Event().wait()",
+            str(fifo.path),
+        )
+    )
+    try:
+        pid = int(await asyncio.to_thread(fifo.receive, 32))
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
-        if not task.done():
-            task.cancel()
+        task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_exec_commands_can_progress_concurrently(protocol, tmp_path):
-    # Local subprocess transport shares the filesystem with this test. Wait for
-    # the first child to start before sending the RPC that releases it.
-    ready, release = tmp_path / "ready", tmp_path / "release"
+async def test_exec_commands_can_progress_concurrently(protocol, fifo_factory):
+    ready, release = fifo_factory(), fifo_factory()
     waiting = asyncio.create_task(
         protocol(
             Exec.command,
             sys.executable,
             "-c",
-            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); p=pathlib.Path(sys.argv[2]); "
-            "\nwhile not p.exists(): time.sleep(.01)",
-            str(ready),
-            str(release),
+            "import sys; open(sys.argv[1], 'wb', buffering=0).write(b'x'); "
+            "assert open(sys.argv[2], 'rb', buffering=0).read(1) == b'x'",
+            str(ready.path),
+            str(release.path),
         )
     )
     try:
-        async with asyncio.timeout(5):
-            while not ready.exists():
-                await asyncio.sleep(0.01)
-            await protocol(Exec.command, "touch", str(release))
-            assert (await waiting).returncode == 0
+        assert await asyncio.to_thread(ready.receive) == b"x"
+        await protocol(
+            Exec.command,
+            sys.executable,
+            "-c",
+            "import sys; open(sys.argv[1], 'wb', buffering=0).write(b'x')",
+            str(release.path),
+        )
+        assert (await waiting).returncode == 0
     finally:
-        release.touch()  # Also release the child if the assertion times out.
-        if not waiting.done():
-            waiting.cancel()
+        release.send()
+        waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)

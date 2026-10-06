@@ -76,6 +76,10 @@ class CpuInfo:
     It is the strictest ``cpu.max`` of the groups the target shows, and None
     means that none of them limits the process.
 
+    ``model`` is absent on an architecture whose ``/proc/cpuinfo`` gives no
+    model name, for example arm64. ``vendor`` then carries the
+    ``CPU implementer`` identifier.
+
     Each section is None when its source is absent, which separates an
     unsupported target from an empty but successful read. ``raw`` keeps the
     text of every source that was read.

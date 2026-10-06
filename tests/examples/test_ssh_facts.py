@@ -8,7 +8,6 @@ import asyncio
 import importlib.util
 import json
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -129,7 +128,7 @@ async def test_collectors_share_lazy_connection_and_cleanup(tmp_path, monkeypatc
     calls.clear()
     cache = JSONCacheDir(".cache/facts")
     await cache.delete("host", "counter")
-    await cache.set("host", "counter", CacheEntry(CounterInfo(0), time.time() - 1000))
+    await cache.set("host", "counter", CacheEntry(CounterInfo(0), 0.0))
     await example.host_facts("host", max_age=60)
     assert calls == ["counter"]
     assert connections == closed == 3

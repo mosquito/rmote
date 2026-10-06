@@ -17,6 +17,9 @@ class Environment(Tool):
 
 
 class Methods(Tool):
+    release: asyncio.Event
+    finished: asyncio.Event
+
     @staticmethod
     def echo(value: str) -> str:
         return value
@@ -49,11 +52,19 @@ class Methods(Tool):
         raise FileNotFoundError("remote file")
 
     @staticmethod
-    async def pause(delay: float, marker: str) -> str:
+    async def pause(marker: str) -> str:
+        Methods.release = asyncio.Event()
+        Methods.finished = asyncio.Event()
         Path(marker).write_text("started")
-        await asyncio.sleep(delay)
+        await Methods.release.wait()
         Path(marker).write_text("finished")
+        Methods.finished.set()
         return "finished"
+
+    @staticmethod
+    async def resume() -> None:
+        Methods.release.set()
+        await Methods.finished.wait()
 
     @staticmethod
     def exit() -> None:
@@ -89,9 +100,8 @@ class Load(Tool):
         raise ValueError(f"failed:{token}")
 
     @staticmethod
-    async def pause(delay: float, token: str) -> str:
-        await asyncio.sleep(delay)
-        return token
+    async def pause() -> None:
+        await asyncio.Event().wait()
 
     @staticmethod
     def roundtrip(token: int, payload: bytes, size: int) -> tuple[int, str, bytes]:

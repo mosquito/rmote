@@ -16,6 +16,16 @@ The target needs Python 3.11 or newer but no rmote installation. rmote sends
 tool code over the connection when it is first used. Package and service tools
 require their system commands and sufficient permissions on the target.
 
+To operate without an agent, rmote runs standard `python3 -qui` on the target:
+
+- `-q` (**quiet**): suppresses Python's startup banner and copyright notices.
+- `-u` (**unbuffered**): forces unbuffered stdout/stderr streams for instant packet delivery.
+- `-i` (**interactive**): reads and executes statements from stdin even without a TTY.
+
+A free-threaded interpreter works on both sides. rmote has no compiled
+extension, and it guards the state it shares between threads with its own
+locks. The tests cover 3.13t and 3.14t on Linux and macOS.
+
 ## Start with a Deployment
 
 Follow the {doc}`quickstart` to deploy a Redis cache in a disposable Docker

@@ -7,7 +7,6 @@ author can take the protection off one method at a time.
 
 import asyncio
 import threading
-import time
 
 import pytest
 
@@ -18,6 +17,8 @@ pytestmark = pytest.mark.timeout(60)
 
 
 class Threads(Tool):
+    entered = threading.Event()
+
     @staticmethod
     def in_thread() -> int:
         return threading.get_ident()
@@ -37,9 +38,15 @@ class Threads(Tool):
         return threading.get_ident()
 
     @staticmethod
-    def waits(seconds: float) -> str:
-        time.sleep(seconds)
+    def waits(path: str) -> str:
+        Threads.entered.set()
+        with open(path, "rb", buffering=0) as pipe:
+            assert pipe.read(1) == b"x"
         return "awake"
+
+    @staticmethod
+    async def wait_started() -> None:
+        assert await asyncio.to_thread(Threads.entered.wait, 10)
 
     @staticmethod
     @inline
@@ -56,15 +63,16 @@ async def test_a_marked_method_runs_in_the_thread_of_the_loop(protocol):
 
 
 @pytest.mark.asyncio
-async def test_an_unmarked_method_that_waits_does_not_stop_the_loop(protocol):
-    slow = asyncio.create_task(protocol(Threads.waits, 0.5))
-    await asyncio.sleep(0.05)
-    start = time.perf_counter()
-    assert await protocol(PingForms.thread) == 1
-    assert await protocol(PingForms.loop) == 1
-    # Both answers arrive while the other method is still sleeping.
-    assert time.perf_counter() - start < 0.3
-    assert not slow.done()
+async def test_an_unmarked_method_that_waits_does_not_stop_the_loop(protocol, fifo):
+    slow = asyncio.create_task(protocol(Threads.waits, str(fifo.path)))
+    try:
+        async with asyncio.timeout(10):
+            await protocol(Threads.wait_started)
+            assert await protocol(PingForms.thread) == 1
+            assert await protocol(PingForms.loop) == 1
+        assert not slow.done()
+    finally:
+        fifo.send()
     assert await slow == "awake"
 
 

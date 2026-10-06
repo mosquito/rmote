@@ -273,12 +273,23 @@ class Connection:
         finally:
             if process.returncode is None:
                 await self._terminate(process)
+            # Reaping the child does not close paused output pipes. This
+            # connection owns them even when protocol startup was cancelled.
+            process._transport.close()  # type: ignore[attr-defined]
             if self._stderr_task is not None:
                 self._stderr_task.cancel()
                 await asyncio.gather(self._stderr_task, return_exceptions=True)
 
     @staticmethod
     async def _terminate(process: asyncio.subprocess.Process) -> None:
+        # A reader stopped during protocol cleanup may leave a full pipe.
+        # Close output before wait(), which also waits for EOF on older
+        # Python versions. Keep the process transport alive until reaped.
+        transport = process._transport  # type: ignore[attr-defined]
+        for fd in (1, 2):
+            pipe = transport.get_pipe_transport(fd)
+            if pipe is not None:
+                pipe.close()
         try:
             process.terminate()
         except ProcessLookupError:
@@ -416,7 +427,7 @@ class Connection:
             raise RuntimeError("Connection is closing or closed")
         future = self._runtime.submit(lambda: self._invoke(timeout, tool, args, kwargs, compressed))
         try:
-            return future.result()
+            return self._runtime.result(future)
         except KeyboardInterrupt:
             future.cancel()
             try:

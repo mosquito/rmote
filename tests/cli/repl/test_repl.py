@@ -4,10 +4,14 @@ import re
 import signal
 import subprocess
 import sys
+import threading
+from contextlib import nullcontext
+from pathlib import Path
 
 import pytest
 
 from rmote.cli import build_parser
+from rmote.cli.repl import wake_on_signals
 from tests.cli.repl.conftest import Session
 
 
@@ -121,7 +125,7 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
         "    @staticmethod\n"
         "    async def wait():\n"
         "        import asyncio\n"
-        "        await asyncio.sleep(60)\n"
+        "        await asyncio.Event().wait()\n"
     )
     assert b"Traceback" not in output
     output = session.send(f"print('PID', {prefix}remote(Probe.pid))")
@@ -132,7 +136,7 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
     if asynchronous:
         session.send("async def twice():\n    return await remote(Probe.pid)\n")
         assert str(pid).encode() in session.send("await twice()")
-        session.send("task = asyncio.create_task(asyncio.sleep(0.01, result=123))")
+        session.send("task = asyncio.create_task(asyncio.sleep(0, result=123))")
         # Reading the next line must leave the protocol event loop running.
         assert b"123" in session.send("await task")
     os.write(session.master, f"print('WAITING', flush=True); {prefix}remote(Probe.wait)\n".encode())
@@ -140,8 +144,6 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
     os.write(session.master, b"\x03")
     assert b"KeyboardInterrupt" in session.until(b">>> ")
     assert str(pid).encode() in session.send(f"{prefix}remote(Probe.pid)")
-    session.process.send_signal(signal.SIGINT)
-    session.until(b">>> ")
     # libedit's default Ctrl-D action includes completion. Select its explicit
     # EOF action to test Python's EOF handling independently of the keymap.
     session.send(
@@ -153,14 +155,74 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
         os.kill(pid, 0)
 
 
-def test_sigterm_reaps_transport(session: Session) -> None:
+@pytest.mark.parametrize("delivery", ["process", "pending"])
+def test_idle_sigint_restarts_input(session: Session, fifo, delivery: str) -> None:
+    if delivery == "pending":
+        session.send("import _thread, signal, threading")
+        session.send(
+            "def interrupt_from_thread():\n"
+            f"    with open({str(fifo.path)!r}, 'rb') as control:\n"
+            "        control.read(1)\n"
+            "    _thread.interrupt_main(signal.SIGINT)\n"
+        )
+        session.send("threading.Thread(target=interrupt_from_thread, daemon=True).start()")
+        fifo.send()
+    else:
+        session.process.send_signal(signal.SIGINT)
+    output = session.until(b">>> ")
+    assert b"KeyboardInterrupt" in output
+    output = session.send("print('STILL_USABLE')")
+    assert b"STILL_USABLE" in output
+    assert b"KeyboardInterrupt" not in output
+
+
+@pytest.mark.parametrize("delivery", ["process", "pending"])
+def test_sigterm_reaps_transport(session: Session, tmp_path: Path, delivery: str) -> None:
     prefix = "await " if session.asynchronous else ""
     session.send(
         "class Probe(Tool):\n    @staticmethod\n    def pid():\n        import os\n        return os.getpid()\n"
     )
     output = session.send(f"print('PID', {prefix}remote(Probe.pid))")
     pid = int(re.search(rb"PID (\d+)", output)[1])  # type: ignore[index]
-    session.process.terminate()
+    if delivery == "pending":
+        # Reproduce a pending Python handler without interrupting readline's
+        # syscall. Real process signals race with entry into that syscall.
+        control = tmp_path / "terminate"
+        os.mkfifo(control)
+        session.send("import _thread, signal, threading")
+        session.send(
+            "def terminate_from_thread():\n"
+            f"    with open({str(control)!r}, 'rb') as control:\n"
+            "        control.read(1)\n"
+            "    _thread.interrupt_main(signal.SIGTERM)\n"
+        )
+        session.send("threading.Thread(target=terminate_from_thread, daemon=True).start()")
+        with control.open("wb") as handle:
+            handle.write(b"!")
+    else:
+        session.process.terminate()
     assert session.wait() == 143
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_signal_wakeup_restores_process_state(fail: bool) -> None:
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    previous_interrupt = signal.getsignal(signal.SIGINT)
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    previous_fd = signal.set_wakeup_fd(writer)
+    try:
+        with pytest.raises(ValueError) if fail else nullcontext():
+            with wake_on_signals():
+                if fail:
+                    raise ValueError("console failed")
+        assert signal.getsignal(signal.SIGTERM) == previous_handler
+        assert signal.getsignal(signal.SIGINT) == previous_interrupt
+        assert signal.set_wakeup_fd(writer) == writer
+        assert not any(thread.name == "rmote-repl-signals" for thread in threading.enumerate())
+    finally:
+        signal.set_wakeup_fd(previous_fd)
+        os.close(writer)
+        os.close(reader)

@@ -11,6 +11,7 @@ import pytest
 from rmote.protocol import Flags, Tool
 from rmote.sync import Connection
 from tests.support.tool_cases.concurrent_tools import FirstCounter, SecondCounter
+from tests.support.tool_cases.idle import Idle
 
 pytestmark = pytest.mark.timeout(15)
 
@@ -93,20 +94,12 @@ def test_concurrent_first_call_preserves_results_exceptions_and_state(monkeypatc
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_concurrent_classes_from_one_module_share_state():
+def test_concurrent_classes_from_one_module_share_state(capture_logs):
     remote = Connection.from_local()
-    messages = []
+    capture = capture_logs("rmote.remote.rmote-concurrent-module")
     workers = 12
     start = threading.Barrier(workers + 1)
     pool = ThreadPoolExecutor(max_workers=workers)
-
-    class Capture(logging.Handler):
-        def emit(self, record):
-            messages.append(record.getMessage())
-
-    logger = logging.getLogger("rmote.remote.rmote-concurrent-module")
-    handler = Capture()
-    logger.addHandler(handler)
 
     def call(token):
         start.wait(timeout=5)
@@ -120,11 +113,11 @@ def test_concurrent_classes_from_one_module_share_state():
         assert [result[0] for result in results] == list(range(workers))
         assert {result[1] for result in results} == set(range(1, workers + 1))
         assert len({result[2] for result in results}) == 1
-        assert messages == ["concurrent module loaded"]
+        capture.wait(1)
+        assert capture.messages == ["concurrent module loaded"]
     finally:
         remote.close()
         pool.shutdown(wait=True, cancel_futures=True)
-        logger.removeHandler(handler)
 
 
 def test_close_finishes_concurrent_rpc_and_concurrent_closers():
@@ -222,46 +215,20 @@ def test_logging_handler_reentry_fails_in_loop_thread_with_debug():
         remote.close()
 
 
-def test_idle_logs_and_eof_are_processed_without_rpc():
-    class IdleTool(Tool):
-        @staticmethod
-        async def schedule_log() -> None:
-            import asyncio
-            import logging
-
-            logger = logging.getLogger("rmote-idle-test")
-            asyncio.get_running_loop().call_later(0.05, logger.warning, "idle record")
-
-        @staticmethod
-        async def schedule_exit() -> None:
-            import asyncio
-            import os
-
-            asyncio.get_running_loop().call_later(0.05, os._exit, 0)
-
-    remote = Connection.from_local()
-    handled = threading.Event()
-
-    class Capture(logging.Handler):
-        def emit(self, record):
-            if record.getMessage() == "idle record":
-                handled.set()
-
-    logger = logging.getLogger("rmote.remote.rmote-idle-test")
-    handler = Capture()
-    logger.addHandler(handler)
+def test_idle_logs_and_eof_are_processed_without_rpc(fifo, capture_logs):
+    capture = capture_logs("rmote.remote.rmote-idle-test")
 
     async def wait_closed():
         assert remote._protocol is not None
         await asyncio.wait_for(remote._protocol.wait_closed(), timeout=5)
 
-    try:
-        remote(IdleTool.schedule_log)
-        assert handled.wait(5)
-        remote(IdleTool.schedule_exit)
+    with Connection.from_local() as remote:
+        remote(Idle.log, str(fifo.path), "rmote-idle-test")
+        fifo.send()
+        capture.wait(1)
+        assert capture.messages == ["idle record"]
+        remote(Idle.exit, str(fifo.path))
+        fifo.send()
         remote._runtime.run(wait_closed)
         with pytest.raises((ConnectionError, EOFError)):
-            remote(IdleTool.schedule_log)
-    finally:
-        logger.removeHandler(handler)
-        remote.close()
+            remote(Idle.log, str(fifo.path), "rmote-idle-test")

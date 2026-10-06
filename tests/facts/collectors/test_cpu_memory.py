@@ -324,8 +324,13 @@ def test_collect_on_this_host_matches_its_platform():
     assert cpu.architecture == platform.machine()
     assert cpu.usable is not None
     if cpu.available:
-        assert cpu.model and cpu.topology is not None and cpu.topology.logical
+        assert cpu.topology is not None and cpu.topology.logical
         assert "cpuinfo" in cpu.raw
+        # An arm64 kernel publishes no model name, so the model follows the
+        # table exactly: present when the table names it, absent when not.
+        records = CpuFacts.parse_cpuinfo(cpu.raw["cpuinfo"])
+        named = bool(records) and bool(records[0].get("model name") or records[0].get("Model"))
+        assert bool(cpu.model) is named
     else:
         # No kernel table, but sysconf counts the online processors.
         assert cpu.topology is not None and cpu.topology.logical

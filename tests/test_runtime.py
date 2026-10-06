@@ -7,7 +7,7 @@ import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
-from types import AsyncGeneratorType
+from types import AsyncGeneratorType, SimpleNamespace
 
 import pytest
 
@@ -115,16 +115,25 @@ def test_cancel_running_request_runs_its_cleanup(runtime: _Runtime) -> None:
     assert runtime.run(lambda: asyncio.sleep(0, result=2)) == 2
 
 
-def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime) -> None:
+def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime, monkeypatch) -> None:
     entered = threading.Event()
     cleaned = threading.Event()
+    waiting = threading.Event()
+    release = asyncio.Event()
+    original = runtime._await_task
+
+    async def observe(future):
+        waiting.set()
+        await original(future)
+
+    monkeypatch.setattr(runtime, "_await_task", observe)
 
     async def wait() -> None:
         entered.set()
         try:
             await asyncio.Event().wait()
         finally:
-            await asyncio.sleep(0.05)
+            await release.wait()
             cleaned.set()
 
     future = runtime.submit(wait)
@@ -132,7 +141,16 @@ def test_wait_returns_after_the_work_of_a_future_ends(runtime: _Runtime) -> None
     assert future.cancel()
     # A caller that gave up still owns the operation, so wait() returns only
     # after the loop has finished with it.
-    runtime.wait(future)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiter = pool.submit(runtime.wait, future)
+        try:
+            assert waiting.wait(5)
+            assert not waiter.done()
+            assert not cleaned.is_set()
+        finally:
+            assert runtime._loop is not None
+            runtime._loop.call_soon_threadsafe(release.set)
+        waiter.result(5)
     assert cleaned.is_set()
 
 
@@ -142,17 +160,25 @@ def test_wait_on_a_finished_future_returns_at_once(runtime: _Runtime) -> None:
     runtime.wait(future)
 
 
-def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime) -> None:
+def test_timeout_cancels_wait_and_keeps_runtime_open(runtime: _Runtime, monkeypatch) -> None:
+    entered = threading.Event()
     cleaned = threading.Event()
 
     async def wait() -> None:
         try:
+            entered.set()
             await asyncio.Event().wait()
         finally:
             cleaned.set()
 
-    with pytest.raises(TimeoutError):
-        runtime.run(wait, timeout=0.05)
+    def expire(future, timeout=None):
+        assert entered.wait(5)
+        raise TimeoutError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "result", expire)
+        with pytest.raises(TimeoutError):
+            runtime.run(wait, timeout=1)
     assert cleaned.wait(5)
     assert runtime.run(lambda: asyncio.sleep(0, result=3)) == 3
 
@@ -212,6 +238,179 @@ print('clean interrupt')
     assert process.returncode == 0, process.stderr
     assert process.stdout.strip() == "clean interrupt"
     assert not process.stderr
+
+
+def test_interrupt_from_outside_the_process_stops_a_main_thread_wait() -> None:
+    """A terminal signal must stop the wait, whichever thread receives it.
+
+    The sender is another process, so only the main thread and the threads of
+    the runtime can receive the signal, as with a terminal. The wait of the
+    main thread must end for every signal, including one that arrives just
+    before the wait starts.
+    """
+    script = """
+import asyncio
+import os
+import subprocess
+import sys
+import threading
+from rmote._runtime import _Runtime
+
+SENDER = "import os, signal, sys; sys.stdin.buffer.read(1); os.kill(int(sys.argv[1]), signal.SIGINT)"
+runtime = _Runtime()
+try:
+    for attempt in range(6):
+        entered = threading.Event()
+
+        async def wait():
+            entered.set()
+            await asyncio.Event().wait()
+
+        future = runtime.submit(wait)
+        assert entered.wait(5)
+        sender = subprocess.Popen([sys.executable, "-c", SENDER, str(os.getpid())], stdin=subprocess.PIPE)
+        gate = runtime._gates[future]
+
+        class SignalGate:
+            sent = False
+
+            def acquire(self, *args):
+                if not self.sent:
+                    self.sent = True
+                    sender.stdin.write(b"x")
+                    sender.stdin.flush()
+                return gate.acquire(*args)
+
+            def release(self):
+                gate.release()
+
+        runtime._gates[future] = SignalGate()
+        try:
+            runtime.result(future)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError(f"attempt {attempt}: no KeyboardInterrupt")
+        finally:
+            future.cancel()
+            sender.stdin.close()
+            sender.wait(timeout=5)
+    assert runtime.run(lambda: asyncio.sleep(0, result=5)) == 5
+finally:
+    runtime.close()
+print("every interrupt arrived")
+"""
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0, process.stderr
+    assert process.stdout.strip() == "every interrupt arrived"
+
+
+def test_result_spends_only_the_remaining_deadline(runtime: _Runtime, monkeypatch) -> None:
+    """Sliced waits consume a deadline; scheduling latency is irrelevant."""
+    now = 0.0
+    waits = []
+    future: Future[None] = Future()
+
+    class Gate:
+        def acquire(self, blocking, timeout):
+            nonlocal now
+            waits.append(timeout)
+            now += timeout
+            return False
+
+    monkeypatch.setattr("rmote._runtime.time", SimpleNamespace(monotonic=lambda: now))
+    runtime._gates[future] = Gate()  # type: ignore[assignment]
+    try:
+        with pytest.raises(TimeoutError):
+            runtime.result(future, 0.125)
+        assert waits == pytest.approx([0.05, 0.05, 0.025])
+        assert not future.done()
+    finally:
+        runtime._gates.pop(future)
+
+
+def test_result_in_a_worker_respects_an_expired_deadline(runtime: _Runtime) -> None:
+    future: Future[None] = Future()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(TimeoutError):
+            pool.submit(runtime.result, future, 0).result(5)
+    assert not future.done()
+
+
+def test_interrupted_request_registration_does_not_block_close() -> None:
+    script = """
+import asyncio
+import sys
+import threading
+from concurrent.futures import Future
+from rmote._runtime import _Runtime
+
+runtime = _Runtime()
+called = False
+
+def factory():
+    global called
+    called = True
+    return asyncio.sleep(0)
+
+def interrupt_registration(frame, event, arg):
+    # Reproduce SIGINT arriving before Condition.__exit__ releases the
+    # future's lock. That future must never reach runtime shutdown.
+    if (event == 'call'
+            and frame.f_code is threading.Condition.__exit__.__code__
+            and frame.f_back.f_code is Future.add_done_callback.__code__):
+        raise KeyboardInterrupt
+    return interrupt_registration
+
+try:
+    sys.settrace(interrupt_registration)
+    try:
+        runtime.submit(factory)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError('Registration was not interrupted')
+    finally:
+        sys.settrace(None)
+    assert not called
+    assert runtime.run(lambda: asyncio.sleep(0, result=4)) == 4
+finally:
+    runtime.close()
+print('closed after interrupted registration')
+"""
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=8)
+    assert process.returncode == 0, process.stderr
+    assert process.stdout.strip() == "closed after interrupted registration"
+    assert not process.stderr
+
+
+def test_requests_and_gates_leave_nothing_behind(runtime: _Runtime) -> None:
+    """Every end of a request must clear both registries of the runtime."""
+
+    async def value() -> int:
+        return 7
+
+    async def fail() -> None:
+        raise FileNotFoundError("remote file")
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    for _ in range(5):
+        assert runtime.run(value) == 7
+        with pytest.raises(FileNotFoundError):
+            runtime.run(fail)
+        with pytest.raises(TimeoutError):
+            runtime.run(forever, timeout=0.05)
+        future = runtime.submit(forever)
+        assert future.cancel()
+        runtime.wait(future, timeout=5)
+
+    # The gates are weakly keyed, so a request that never reached its callback
+    # could not keep an entry either.
+    assert not runtime._requests
+    assert not list(runtime._gates)
+    assert runtime.run(value) == 7
 
 
 def test_loop_thread_rejects_submit_run_and_close(runtime: _Runtime) -> None:
@@ -285,10 +484,20 @@ def test_close_finalizes_async_generators(runtime: _Runtime) -> None:
     assert value.ag_frame is None
 
 
-def test_close_waits_for_executor_work(runtime: _Runtime) -> None:
+def test_close_waits_for_executor_work(runtime: _Runtime, monkeypatch) -> None:
     entered = threading.Event()
     release = threading.Event()
     worker_finished = threading.Event()
+    shutdown_started = threading.Event()
+    assert runtime._loop is not None
+    shutdown = runtime._loop.shutdown_default_executor
+
+    async def observe_shutdown(*args, **kwargs):
+        shutdown_started.set()
+        await shutdown(*args, **kwargs)
+        assert worker_finished.is_set()
+
+    monkeypatch.setattr(runtime._loop, "shutdown_default_executor", observe_shutdown)
 
     def worker() -> None:
         entered.set()
@@ -301,8 +510,9 @@ def test_close_waits_for_executor_work(runtime: _Runtime) -> None:
         with ThreadPoolExecutor(max_workers=1) as closer:
             closing = closer.submit(runtime.close)
             try:
-                with pytest.raises(TimeoutError):
-                    closing.result(timeout=0.05)
+                assert shutdown_started.wait(5)
+                assert not closing.done()
+                assert not worker_finished.is_set()
             finally:
                 release.set()
             closing.result(timeout=5)
@@ -356,6 +566,35 @@ def test_submit_close_race_always_finishes_accepted_requests(runtime: _Runtime) 
             except CancelledError:
                 pass
     assert not runtime._thread.is_alive()
+
+
+def test_close_during_request_registration_rejects_factory(runtime: _Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    registering = threading.Event()
+    release = threading.Event()
+    called = threading.Event()
+    add_done_callback = Future.add_done_callback
+
+    def register(future, callback):
+        add_done_callback(future, callback)
+        if callback == runtime._request_done:
+            registering.set()
+            assert release.wait(5)
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    monkeypatch.setattr(Future, "add_done_callback", register)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        submission = workers.submit(runtime.submit, factory)
+        try:
+            assert registering.wait(5)
+            workers.submit(runtime.close).result(timeout=3)
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="closing or closed"):
+            submission.result(timeout=5)
+    assert not called.is_set()
 
 
 def test_failed_loop_start_does_not_leave_thread(monkeypatch: pytest.MonkeyPatch) -> None:

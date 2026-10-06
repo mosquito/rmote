@@ -26,6 +26,12 @@ rmote writes the bootstrap to that interpreter and loads tools when needed.
 | Kubernetes pod | `kubectl exec -i pod/my-pod --` | `kubectl exec -i pod/my-pod -- python3 -qui` |
 | Local machine | No command prefix | A local Python process with `-qui` |
 
+The appended `-qui` flags are [standard Python interpreter options](https://docs.python.org/3/using/cmdline.html):
+
+- `-q` (**quiet**): suppresses Python's startup banner and copyright notices.
+- `-u` (**unbuffered**): forces stdout and stderr to be unbuffered so protocol packets are sent immediately.
+- `-i` (**interactive**): reads and executes statements from stdin even without a pseudo-terminal (TTY).
+
 Select the interpreter with the factories' `python=` argument or the CLI's
 `-p` / `--python`. The factories use `python3`; pass `python=sys.executable`
 to use the interpreter running your application. `Connection.from_local()`

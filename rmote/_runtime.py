@@ -3,10 +3,12 @@
 import asyncio
 import math
 import threading
+import time
+import weakref
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future, InvalidStateError
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 R = TypeVar("R")
 
@@ -18,6 +20,14 @@ class _Runtime:
     runtime. Shutdown waits for cooperative task cancellation and executor work.
     """
 
+    # How long the main thread stays inside one blocking wait. The operating
+    # system can give a signal to any thread, and only the main thread raises
+    # the exception for it, at its next bytecode. A wait without a limit never
+    # reaches that point, so a signal that arrives just before the wait starts
+    # stops nothing. The main thread therefore waits in slices of this length,
+    # which is also the longest that Ctrl-C needs to take effect.
+    POLL: ClassVar[float] = 0.05
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state = "starting"
@@ -26,6 +36,17 @@ class _Runtime:
         self._ready: Future[None] = Future()
         self._finished: Future[None] = Future()
         self._requests: set[Future[Any]] = set()
+        # A gate for each request of the main thread, held until the request
+        # ends. The main thread waits on the gate instead of the future,
+        # because the loop thread never locks a gate: an interrupt inside the
+        # wait then leaves nothing that the loop thread needs. Another thread
+        # raises no signal and needs no gate.
+        #
+        # The keys are weak, so an entry cannot outlive its future even if a
+        # request never reaches a done callback. The value must stay strong:
+        # the gate has no other owner than this mapping and the thread that
+        # waits on it.
+        self._gates: weakref.WeakKeyDictionary[Future[Any], threading.Lock] = weakref.WeakKeyDictionary()
         # Only the loop thread accesses this dictionary.
         self._tasks: dict[Future[Any], asyncio.Task[None]] = {}
         self._thread = threading.Thread(target=self._serve, name="rmote-runtime", daemon=False)
@@ -73,7 +94,7 @@ class _Runtime:
         finally:
             with self._lock:
                 self._state = "closed"
-                requests = tuple(self._requests)
+                requests = self._requests.copy()
             for future in requests:
                 if error is None:
                     future.cancel()
@@ -140,6 +161,47 @@ class _Runtime:
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
 
+    def result(self, future: Future[R], timeout: float | None = None) -> R:
+        """Wait for *future*, and keep Ctrl-C working in the main thread.
+
+        The main thread waits for the gate of its request in slices, so it
+        reaches its next bytecode regularly and raises a signal that arrived
+        meanwhile. Another thread waits for the future itself: a signal never
+        raises in it, and it pays nothing for this.
+
+        The gate exists for this reason as well. ``Future.result`` and
+        ``concurrent.futures.wait`` lock the future itself, and an interrupt
+        inside those locks leaves the lock held, which stops the loop thread
+        for good. A gate belongs to the caller alone.
+
+        Args:
+            future: The future to wait for.
+            timeout: Seconds to wait, or None to wait for the result.
+
+        Returns:
+            The result of the future.
+
+        Raises:
+            TimeoutError: *timeout* passed before the result arrived.
+            BaseException: Whatever the operation raised.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return future.result(timeout)
+        gate = self._gates.get(future)
+        if gate is None:
+            # The request ended already, or another thread submitted it.
+            return future.result(timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            limit = self.POLL
+            if deadline is not None:
+                limit = min(limit, deadline - time.monotonic())
+                if limit <= 0:
+                    raise TimeoutError
+            if gate.acquire(True, limit):
+                gate.release()
+                return future.result()
+
     def wait(self, future: Future[Any], *, timeout: float | None = None) -> None:
         """Block until the loop has finished the work behind *future*.
 
@@ -149,6 +211,12 @@ class _Runtime:
         self.run(lambda: self._await_task(future), timeout=timeout)
 
     def _request_done(self, future: Future[Any]) -> None:
+        # A release never waits, so the caller of this callback, which can be
+        # the loop thread, is never held up. Neither this nor the lookup takes
+        # the lock of the runtime: one mapping operation is atomic by itself.
+        gate = self._gates.pop(future, None)
+        if gate is not None:
+            gate.release()
         with self._lock:
             self._requests.discard(future)
             if future.cancelled() and self._state != "closed" and self._loop is not None:
@@ -162,19 +230,28 @@ class _Runtime:
     def submit(self, factory: Callable[[], Coroutine[Any, Any, R]]) -> Future[R]:
         """Schedule a coroutine factory without invoking it in the caller's thread."""
         self._check_thread()
-        with self._lock:
+        future: Future[R] = Future()
+        try:
+            # Prepare the future before publishing it: an interrupt inside
+            # add_done_callback can leave its lock held by the caller.
+            future.add_done_callback(self._request_done)
+            if threading.current_thread() is threading.main_thread():
+                gate = threading.Lock()
+                gate.acquire()
+                self._gates[future] = gate
+            # Do not acquire the runtime lock here: SIGINT during acquisition
+            # can leave it held. Publish before checking the state so shutdown
+            # either sees this request in its snapshot or submission rejects it.
+            self._requests.add(future)
             if self._state != "open":
                 raise RuntimeError("Runtime is closing or closed")
             assert self._loop is not None
-            future: Future[R] = Future()
-            self._requests.add(future)
-            future.add_done_callback(self._request_done)
-            try:
-                self._loop.call_soon_threadsafe(self._start, factory, future)
-            except BaseException:
-                self._requests.discard(future)
-                raise
-            return future
+            self._loop.call_soon_threadsafe(self._start, factory, future)
+        except BaseException:
+            self._requests.discard(future)
+            self._gates.pop(future, None)
+            raise
+        return future
 
     def run(self, factory: Callable[[], Coroutine[Any, Any, R]], *, timeout: float | None = None) -> R:
         """Wait for a result; timeout or interruption cancels the local operation."""
@@ -183,7 +260,7 @@ class _Runtime:
             raise ValueError("timeout must be finite and positive, or None")
         future = self.submit(factory)
         try:
-            return future.result(timeout)
+            return self.result(future, timeout)
         except (TimeoutError, KeyboardInterrupt):
             future.cancel()
             raise

@@ -197,10 +197,8 @@ async def test_class_and_function_share_declared_package_import_locks(package, i
 
     root = Path(package.__file__).parent
     (root / "mixed.py").write_text("""__tool_package__ = "module_tool_probe"
-import time
 from rmote.protocol import Tool
 from .models import Record
-time.sleep(0.05)
 class Mixed(Tool):
     @staticmethod
     def run():

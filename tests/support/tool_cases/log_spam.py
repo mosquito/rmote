@@ -2,20 +2,19 @@
 
 import asyncio
 import logging
-import time
 
 from rmote.protocol import Tool
 
 
 class LogSpam(Tool):
+    pending: asyncio.Event | None = None
+
     @staticmethod
-    def speak(count: int, delay: float = 0.0, label: str = "record") -> int:
+    def speak(count: int, label: str = "record") -> int:
         """Emit *count* records from a worker thread of the remote side."""
         logger = logging.getLogger("delivery-test")
         for index in range(count):
             logger.warning("%s %s", label, index)
-            if delay:
-                time.sleep(delay)
         return count
 
     @staticmethod
@@ -31,8 +30,13 @@ class LogSpam(Tool):
         return count
 
     @staticmethod
-    async def speak_later(delay: float = 0.02, message: str = "from a timer") -> float:
-        """Emit one record after this call returns, from a timer of the loop."""
-        logger = logging.getLogger("delivery-test")
-        asyncio.get_running_loop().call_later(delay, logger.warning, "%s", message)
-        return delay
+    async def speak_until_released() -> int:
+        LogSpam.pending = asyncio.Event()
+        logging.getLogger("delivery-test").warning("record 0")
+        await LogSpam.pending.wait()
+        return 1
+
+    @staticmethod
+    async def release() -> None:
+        if LogSpam.pending is not None:
+            LogSpam.pending.set()

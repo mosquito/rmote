@@ -24,13 +24,13 @@ def drive_shell(
     script: bytes,
     size: tuple[int, int] = (24, 80),
     env: dict[str, str] | None = None,
+    ready_marker: bytes = b"RMOTE_SHELL_READY> ",
 ) -> tuple[int, bytes]:
     """Run rmote shell behind a terminal, feed *script*, collect the output.
 
     The client needs a real terminal to enter raw mode, so the test owns the
     master side and the client gets the slave side as its standard descriptors.
-    The script is sent after the first output, because the client forwards input
-    only once the session is open.
+    The script is sent after the shell prompt or the child's explicit marker.
     """
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
@@ -38,6 +38,7 @@ def drive_shell(
     child_env = dict(os.environ)
     child_env.setdefault("SHELL", "/bin/sh")
     child_env["TERM"] = "xterm"
+    child_env["PS1"] = "RMOTE_SHELL_READY> "
     if env:
         child_env.update(env)
 
@@ -53,7 +54,6 @@ def drive_shell(
     out = bytearray()
     pending = script
     deadline = time.monotonic() + DRIVE_TIMEOUT
-    send_deadline = time.monotonic() + 10
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master_fd], [], [], 0.5)
@@ -65,13 +65,9 @@ def drive_shell(
                 if not chunk:
                     break
                 out += chunk
-                if pending:
+                if pending and ready_marker in out:
                     os.write(master_fd, pending)
                     pending = b""
-                continue
-            if pending and time.monotonic() > send_deadline:
-                os.write(master_fd, pending)
-                pending = b""
                 continue
             if process.poll() is not None:
                 break
@@ -260,14 +256,23 @@ class TestTerminalSessionEndToEnd:
         assert b"37 99" in output
         assert status == 0
 
-    def test_escape_sequence_closes_the_session(self) -> None:
+    @pytest.mark.parametrize("exit_status", [0, 37])
+    def test_escape_sequence_closes_the_session(self, exit_status: int) -> None:
+        # A shell can exit normally when closing the PTY gives it EOF. Use a
+        # ready child with a known hangup status to check closure and forwarding.
+        child = (
+            "import os, signal; "
+            f"signal.signal(signal.SIGHUP, lambda *_: os._exit({exit_status})); "
+            "print('ESCAPE_READY', flush=True); signal.pause()"
+        )
         status, output = drive_shell(
-            ["--python", sys.executable, "--command", "/bin/sh"],
+            ["--python", sys.executable, "--command", sys.executable, "--command=-c", "--command", child],
             b"\n~.",
+            ready_marker=b"ESCAPE_READY",
         )
 
         assert b"session closed" in output
-        assert status != 0
+        assert status == exit_status
 
     def test_escape_can_be_disabled(self) -> None:
         status, output = drive_shell(

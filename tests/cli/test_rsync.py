@@ -10,13 +10,19 @@ import pytest
 from rmote.cli import build_parser
 
 
-def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(*args: str, asyncio_debug: bool = False) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    # Normal progress output must not depend on slow-callback diagnostics
+    # inherited from CI. Exercise debug logging separately below.
+    env.pop("PYTHONASYNCIODEBUG", None)
+    if asyncio_debug:
+        env["PYTHONASYNCIODEBUG"] = "1"
     return subprocess.run(
         [sys.executable, "-m", "rmote", "rsync", *args],
         capture_output=True,
         text=True,
         timeout=20,
-        env={**os.environ, "PYTHONASYNCIODEBUG": "1"},
+        env=env,
     )
 
 
@@ -181,13 +187,16 @@ def test_quiet_and_keep_permissions(tmp_path: Path) -> None:
     assert target.stat().st_mode & 0o777 == 0o600
 
 
-def test_debug_includes_asyncio_diagnostics(tmp_path: Path) -> None:
+@pytest.mark.parametrize("debug", [False, True])
+def test_asyncio_diagnostics_follow_debug_flag(tmp_path: Path, debug: bool) -> None:
     source, target = tmp_path / "source", tmp_path / "target"
     source.write_bytes(b"payload")
-    result = run_cli("--debug", str(source), f"remote:{target}")
+    options = ["--debug"] if debug else []
+    result = run_cli(*options, str(source), f"remote:{target}", asyncio_debug=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
-    assert "execute program" in result.stderr
+    assert ("execute program" in result.stderr) is debug
+    assert "Close running child process" not in result.stderr
     assert "7 bytes transferred" in result.stderr
     assert target.read_bytes() == b"payload"
 

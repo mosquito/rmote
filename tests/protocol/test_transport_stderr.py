@@ -13,6 +13,7 @@ import sys
 import pytest
 
 from rmote.protocol import BaseProtocol, Protocol
+from tests.support.synchronization import async_wait_until
 from tests.support.tool_cases.ping import Ping
 
 pytestmark = pytest.mark.timeout(60)
@@ -31,7 +32,7 @@ FLOOD = 'i=0; while [ $i -lt 20000 ]; do echo "noise $i" >&2; i=$((i+1)); done &
 @pytest.mark.asyncio
 async def test_a_transport_that_speaks_on_stderr_explains_the_failure():
     """This is the Store alias of Windows: the transport says why and exits."""
-    protocol = await Protocol.from_command("sh", "-c", "echo 'Python was not found' >&2; sleep 0.3")
+    protocol = await Protocol.from_command("sh", "-c", "echo 'Python was not found' >&2")
     with pytest.raises(ConnectionError, match="Its transport said: Python was not found"):
         async with protocol:
             pass
@@ -55,17 +56,15 @@ async def test_transport_exits_before_the_ready_write():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("close_stdout", [False, True])
 async def test_failed_ready_write_does_not_wait_for_open_output_pipes(close_stdout):
-    script = "import os, time; os.close(0); "
+    script = "import os, threading; os.close(0); "
     if close_stdout:
         script += "os.close(1); "
-    script += "os.write(2, b'transport-failed\\n'); time.sleep(60)"
+    script += "os.write(2, b'transport-failed\\n'); threading.Event().wait()"
     remote = await Protocol.from_command(sys.executable, "-c", script)
     process = remote._owned_process
     assert process is not None
     try:
-        async with asyncio.timeout(5):
-            while not remote.transport_said:
-                await asyncio.sleep(0.001)
+        await async_wait_until(lambda: remote.transport_said)
         with pytest.raises(ConnectionError, match="Its transport said: transport-failed"):
             async with asyncio.timeout(3), remote:
                 pass
@@ -91,7 +90,7 @@ async def test_a_transport_that_floods_its_stderr_keeps_the_calls_working():
     async with await Protocol.from_command("sh", "-c", FLOOD, "sh", python=sys.executable) as remote:
         for _ in range(3):
             assert await remote(Ping.ping) == 1
-        await asyncio.sleep(0.1)
+        await async_wait_until(lambda: any("noise 19999" in line for line in remote.transport_said))
         assert remote.transport_said
         assert len(remote.transport_said) <= BaseProtocol.MAX_START_FAILURE_LINES
 
@@ -132,9 +131,7 @@ async def test_close_releases_paused_pipes_after_the_process_exits():
             transport.get_pipe_transport(1).pause_reading()
             transport.get_pipe_transport(2).pause_reading()
             process.terminate()
-            async with asyncio.timeout(5):
-                while process.returncode is None:
-                    await asyncio.sleep(0.001)
+            await async_wait_until(lambda: process.returncode is not None)
         assert transport.is_closing()
         assert all(transport.get_pipe_transport(fd).is_closing() for fd in (0, 1, 2))
     finally:
@@ -145,12 +142,13 @@ async def test_close_releases_paused_pipes_after_the_process_exits():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ignore_term", [False, True], ids=["terminate", "kill"])
 async def test_close_reaps_the_process_before_closing_its_transport(ignore_term, caplog):
-    handler = "signal.SIG_IGN" if ignore_term else "lambda *_: os._exit(23)"
-    script = (
-        "import os, signal, time; "
-        f"signal.signal(signal.SIGTERM, {handler}); "
-        "os.close(0); os.close(1); os.close(2); time.sleep(60)"
-    )
+    script = "import os, signal; "
+    if ignore_term:
+        script += "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    else:
+        script += "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM}); "
+    script += "os.close(0); os.close(1); os.close(2); "
+    script += "signal.pause()" if ignore_term else "signal.sigwait({signal.SIGTERM}); os._exit(23)"
     remote = await Protocol.from_command(sys.executable, "-c", script)
     process = remote._owned_process
     assert process is not None
@@ -159,7 +157,8 @@ async def test_close_reaps_the_process_before_closing_its_transport(ignore_term,
     debug = loop.get_debug()
     try:
         loop.set_debug(True)
-        # EOF is sent only after the child has installed its signal handler.
+        # EOF follows signal setup. sigwait also accepts SIGTERM arriving
+        # before the wait, without depending on a pending Python handler.
         async with asyncio.timeout(5):
             assert remote._stderr_task is not None
             await remote._stderr_task
