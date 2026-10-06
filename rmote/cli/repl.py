@@ -117,14 +117,20 @@ def terminate(signum: int, frame: FrameType | None) -> Never:
 
 
 @contextmanager
-def wake_on_termination() -> Iterator[None]:
-    """Wake readline while a Python SIGTERM handler is pending."""
+def wake_on_signals() -> Iterator[None]:
+    """Wake readline while a Python SIGINT or SIGTERM handler is pending."""
     main_thread = threading.get_ident()
     stopped = False
+    handled: dict[int, int] = dict.fromkeys((signal.SIGINT, signal.SIGTERM), 0)
+    interrupt = signal.getsignal(signal.SIGINT)
 
     def handle(signum: int, frame: FrameType | None) -> None:
         nonlocal stopped
-        if not stopped:
+        handled[signum] += 1
+        if signum == signal.SIGINT:
+            if callable(interrupt):
+                interrupt(signum, frame)
+        elif not stopped:
             stopped = True
             terminate(signum, frame)
 
@@ -135,17 +141,28 @@ def wake_on_termination() -> Iterator[None]:
         os.set_blocking(writer, False)
         previous_handler = signal.signal(signal.SIGTERM, handle)
         stack.callback(signal.signal, signal.SIGTERM, previous_handler)
+        if callable(interrupt):
+            signal.signal(signal.SIGINT, handle)
+            stack.callback(signal.signal, signal.SIGINT, interrupt)
         previous_fd = signal.set_wakeup_fd(writer)
         stack.callback(signal.set_wakeup_fd, previous_fd)
 
         def wake_main() -> None:
+            observed = dict.fromkeys(handled, 0)
             while not stopped:
                 data = os.read(reader, 4096)
-                if signal.SIGTERM in data and not stopped:
+                for signum in handled:
+                    if signum not in data or stopped or signal.getsignal(signum) is not handle:
+                        continue
+                    if handled[signum] != observed[signum]:
+                        # This includes the byte from our own forwarded signal:
+                        # its Python handler ran, so it needs no further wakeup.
+                        observed[signum] = handled[signum]
+                        continue
                     # Python handles signals in the main thread, but readline
                     # needs its blocking syscall interrupted first. Retry until
                     # the handler runs, including a signal just before select.
-                    signal.pthread_kill(main_thread, signal.SIGTERM)
+                    signal.pthread_kill(main_thread, signum)
                     time.sleep(0.01)
 
         thread = threading.Thread(target=wake_main, name="rmote-repl-signals", daemon=True)
@@ -213,7 +230,7 @@ def run_console(transport: list[str], *, python: str, asynchronous: bool, comman
                 return 1
             return int(console.failed)
         enable_completion(main.__dict__, stack)
-        with wake_on_termination():
+        with wake_on_signals():
             console.interact(banner=banner(host, asynchronous), exitmsg="")
         return 0
 

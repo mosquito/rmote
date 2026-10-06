@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from rmote.cli import build_parser
-from rmote.cli.repl import wake_on_termination
+from rmote.cli.repl import wake_on_signals
 from tests.cli.repl.conftest import Session
 
 
@@ -144,8 +144,6 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
     os.write(session.master, b"\x03")
     assert b"KeyboardInterrupt" in session.until(b">>> ")
     assert str(pid).encode() in session.send(f"{prefix}remote(Probe.pid)")
-    session.process.send_signal(signal.SIGINT)
-    session.until(b">>> ")
     # libedit's default Ctrl-D action includes completion. Select its explicit
     # EOF action to test Python's EOF handling independently of the keymap.
     session.send(
@@ -155,6 +153,27 @@ def test_terminal_tool_multiline_errors_interrupt_and_eof(session: Session) -> N
     assert session.wait() == 0
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("delivery", ["process", "pending"])
+def test_idle_sigint_restarts_input(session: Session, fifo, delivery: str) -> None:
+    if delivery == "pending":
+        session.send("import _thread, signal, threading")
+        session.send(
+            "def interrupt_from_thread():\n"
+            f"    with open({str(fifo.path)!r}, 'rb') as control:\n"
+            "        control.read(1)\n"
+            "    _thread.interrupt_main(signal.SIGINT)\n"
+        )
+        session.send("threading.Thread(target=interrupt_from_thread, daemon=True).start()")
+        fifo.send()
+    else:
+        session.process.send_signal(signal.SIGINT)
+    output = session.until(b">>> ")
+    assert b"KeyboardInterrupt" in output
+    output = session.send("print('STILL_USABLE')")
+    assert b"STILL_USABLE" in output
+    assert b"KeyboardInterrupt" not in output
 
 
 @pytest.mark.parametrize("delivery", ["process", "pending"])
@@ -188,17 +207,19 @@ def test_sigterm_reaps_transport(session: Session, tmp_path: Path, delivery: str
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_termination_wakeup_restores_process_state(fail: bool) -> None:
+def test_signal_wakeup_restores_process_state(fail: bool) -> None:
     previous_handler = signal.getsignal(signal.SIGTERM)
+    previous_interrupt = signal.getsignal(signal.SIGINT)
     reader, writer = os.pipe()
     os.set_blocking(writer, False)
     previous_fd = signal.set_wakeup_fd(writer)
     try:
         with pytest.raises(ValueError) if fail else nullcontext():
-            with wake_on_termination():
+            with wake_on_signals():
                 if fail:
                     raise ValueError("console failed")
         assert signal.getsignal(signal.SIGTERM) == previous_handler
+        assert signal.getsignal(signal.SIGINT) == previous_interrupt
         assert signal.set_wakeup_fd(writer) == writer
         assert not any(thread.name == "rmote-repl-signals" for thread in threading.enumerate())
     finally:
