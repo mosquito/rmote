@@ -269,9 +269,18 @@ class PipeSession(ProcessSession):
 class TerminalSession(ProcessSession):
     """A child process behind a pseudo terminal."""
 
-    def __init__(self, process: asyncio.subprocess.Process, master_fd: int) -> None:
+    def __init__(self, process: asyncio.subprocess.Process, master_fd: int, slave_fd: int) -> None:
         super().__init__(process)
         self.master_fd = master_fd
+        self.slave_fd = slave_fd
+        self.exit_waiter = asyncio.create_task(process.wait())
+        # A done callback also runs when release cancels an unstarted task.
+        self.exit_waiter.add_done_callback(lambda _: self.close_slave())
+
+    def close_slave(self) -> None:
+        if self.slave_fd >= 0:
+            os.close(self.slave_fd)
+            self.slave_fd = -1
 
     @classmethod
     async def start(
@@ -308,12 +317,12 @@ class TerminalSession(ProcessSession):
             )
         except BaseException:
             os.close(master_fd)
-            raise
-        finally:
-            # The child keeps its own copy. The parent must release the
-            # slave, or the master never reports the end of the output.
             os.close(slave_fd)
-        return cls(process, master_fd)
+            raise
+        # macOS flushes unread output on the last slave close. Retaining our
+        # copy lets the controlling process drain its terminal during exit.
+        # Once it exits, close the copy so the master can report EOF on Linux.
+        return cls(process, master_fd, slave_fd)
 
     async def read(self, size: int) -> bytes:
         await wait_readable(self.master_fd)
@@ -359,7 +368,12 @@ class TerminalSession(ProcessSession):
             loop.remove_writer(self.master_fd)
             os.close(self.master_fd)
             self.master_fd = -1
-        await super().release()
+        try:
+            await super().release()
+        finally:
+            self.exit_waiter.cancel()
+            self.close_slave()
+            await asyncio.gather(self.exit_waiter, return_exceptions=True)
 
 
 class Vty(Tool):

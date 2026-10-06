@@ -221,6 +221,36 @@ class TestResourceOwnership:
     """
 
     @pytest.mark.asyncio
+    async def test_output_survives_the_child_closing_its_descriptors(self, tmp_path) -> None:
+        marker = tmp_path / "closed"
+        script = (
+            "import os, pathlib, sys; "
+            "os.write(1, b'LAST_OUTPUT\\n'); os.closerange(0, 3); "
+            "pathlib.Path(sys.argv[1]).touch(); sys.exit(7)"
+        )
+        before = open_descriptors()
+        key = await Vty.open([sys.executable, "-c", script, str(marker)], launcher=launcher_source())
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                # Do not read until the child has closed every slave copy.
+                # On macOS, the last close would discard its unread output.
+                while not marker.exists():
+                    await asyncio.sleep(0.01)
+                output = b"".join([chunk async for chunk in Vty.output(key)])
+                assert output == b"LAST_OUTPUT\r\n"
+                assert await Vty.wait(key) == 7
+        finally:
+            await Vty.close(key)
+        assert open_descriptors() == before
+
+    @pytest.mark.asyncio
+    async def test_close_without_reading_releases_the_terminal(self) -> None:
+        before = open_descriptors()
+        key = await Vty.open(["/bin/sh", "-c", "printf unread"], launcher=launcher_source())
+        await Vty.close(key)
+        assert open_descriptors() == before
+
+    @pytest.mark.asyncio
     async def test_a_failed_start_releases_the_terminal(self, tmp_path) -> None:
         missing = str(tmp_path / "missing-directory")
         before = open_descriptors()
