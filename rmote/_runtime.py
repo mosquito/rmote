@@ -4,6 +4,7 @@ import asyncio
 import math
 import threading
 import time
+import weakref
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future, InvalidStateError
 from functools import partial
@@ -39,9 +40,13 @@ class _Runtime:
         # ends. The main thread waits on the gate instead of the future,
         # because the loop thread never locks a gate: an interrupt inside the
         # wait then leaves nothing that the loop thread needs. Another thread
-        # raises no signal and needs no gate. Both operations on this
-        # dictionary are atomic, so neither takes the lock of the runtime.
-        self._gates: dict[Future[Any], threading.Lock] = {}
+        # raises no signal and needs no gate.
+        #
+        # The keys are weak, so an entry cannot outlive its future even if a
+        # request never reaches a done callback. The value must stay strong:
+        # the gate has no other owner than this mapping and the thread that
+        # waits on it.
+        self._gates: weakref.WeakKeyDictionary[Future[Any], threading.Lock] = weakref.WeakKeyDictionary()
         # Only the loop thread accesses this dictionary.
         self._tasks: dict[Future[Any], asyncio.Task[None]] = {}
         self._thread = threading.Thread(target=self._serve, name="rmote-runtime", daemon=False)
@@ -207,8 +212,8 @@ class _Runtime:
 
     def _request_done(self, future: Future[Any]) -> None:
         # A release never waits, so the caller of this callback, which can be
-        # the loop thread, is never held up. It stays outside the lock of the
-        # runtime, which every caller thread shares.
+        # the loop thread, is never held up. Neither this nor the lookup takes
+        # the lock of the runtime: one mapping operation is atomic by itself.
         gate = self._gates.pop(future, None)
         if gate is not None:
             gate.release()

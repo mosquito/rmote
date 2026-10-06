@@ -331,6 +331,35 @@ print('closed after interrupted registration')
     assert not process.stderr
 
 
+def test_requests_and_gates_leave_nothing_behind(runtime: _Runtime) -> None:
+    """Every end of a request must clear both registries of the runtime."""
+
+    async def value() -> int:
+        return 7
+
+    async def fail() -> None:
+        raise FileNotFoundError("remote file")
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    for _ in range(5):
+        assert runtime.run(value) == 7
+        with pytest.raises(FileNotFoundError):
+            runtime.run(fail)
+        with pytest.raises(TimeoutError):
+            runtime.run(forever, timeout=0.05)
+        future = runtime.submit(forever)
+        assert future.cancel()
+        runtime.wait(future, timeout=5)
+
+    # The gates are weakly keyed, so a request that never reached its callback
+    # could not keep an entry either.
+    assert not runtime._requests
+    assert not list(runtime._gates)
+    assert runtime.run(value) == 7
+
+
 def test_loop_thread_rejects_submit_run_and_close(runtime: _Runtime) -> None:
     called = threading.Event()
 
