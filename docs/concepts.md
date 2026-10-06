@@ -94,7 +94,8 @@ calling loop. Cancelling a `to_thread` await does not stop its worker thread.
 The chosen {doc}`transport <transports>` connects the client to a Python
 interpreter's stdin/stdout stream. For example, an SSH connection starts
 `ssh -T host python3 -qui`; Docker/Kubernetes exec and local subprocesses carry
-the same bootstrap. The target needs a compatible Python interpreter;
+the same bootstrap (Python's `-qui` flags run quietly, unbuffered, and interactively
+to execute bootstrap statements as they arrive). The target needs a compatible Python interpreter;
 installing rmote or copying the tool project there is not required.
 
 When {meth}`~rmote.protocol.BaseProtocol.from_subprocess` is called, rmote creates

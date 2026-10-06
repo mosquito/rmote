@@ -85,9 +85,10 @@ async def connect():
 ```
 
 Set `RMOTE_CONTAINER` if you used a different container name.
-The connector starts Python inside the container and lets rmote communicate
-through its standard input and output. It also closes the process after use.
-The later SSH connector manages its own process and is shorter.
+The connector starts `python3 -qui` inside the container (using standard Python
+flags: quiet `-q`, unbuffered `-u`, and interactive `-i` to read statements from stdin)
+and lets rmote communicate through its standard input and output. It also closes
+the process after use. The later SSH connector manages its own process and is shorter.
 
 Append your first remote operation to `deploy.py`:
 
