@@ -284,6 +284,53 @@ def test_result_respects_a_timeout_in_the_main_thread_and_in_a_worker(runtime: _
         runtime.wait(future, timeout=5)
 
 
+def test_interrupted_request_registration_does_not_block_close() -> None:
+    script = """
+import asyncio
+import sys
+import threading
+from concurrent.futures import Future
+from rmote._runtime import _Runtime
+
+runtime = _Runtime()
+called = False
+
+def factory():
+    global called
+    called = True
+    return asyncio.sleep(0)
+
+def interrupt_registration(frame, event, arg):
+    # Reproduce SIGINT arriving before Condition.__exit__ releases the
+    # future's lock. That future must never reach runtime shutdown.
+    if (event == 'call'
+            and frame.f_code is threading.Condition.__exit__.__code__
+            and frame.f_back.f_code is Future.add_done_callback.__code__):
+        raise KeyboardInterrupt
+    return interrupt_registration
+
+try:
+    sys.settrace(interrupt_registration)
+    try:
+        runtime.submit(factory)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError('Registration was not interrupted')
+    finally:
+        sys.settrace(None)
+    assert not called
+    assert runtime.run(lambda: asyncio.sleep(0, result=4)) == 4
+finally:
+    runtime.close()
+print('closed after interrupted registration')
+"""
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=8)
+    assert process.returncode == 0, process.stderr
+    assert process.stdout.strip() == "closed after interrupted registration"
+    assert not process.stderr
+
+
 def test_loop_thread_rejects_submit_run_and_close(runtime: _Runtime) -> None:
     called = threading.Event()
 
@@ -426,6 +473,35 @@ def test_submit_close_race_always_finishes_accepted_requests(runtime: _Runtime) 
             except CancelledError:
                 pass
     assert not runtime._thread.is_alive()
+
+
+def test_close_during_request_registration_rejects_factory(runtime: _Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    registering = threading.Event()
+    release = threading.Event()
+    called = threading.Event()
+    add_done_callback = Future.add_done_callback
+
+    def register(future, callback):
+        add_done_callback(future, callback)
+        if callback == runtime._request_done:
+            registering.set()
+            assert release.wait(5)
+
+    def factory():
+        called.set()
+        return asyncio.sleep(0)
+
+    monkeypatch.setattr(Future, "add_done_callback", register)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        submission = workers.submit(runtime.submit, factory)
+        try:
+            assert registering.wait(5)
+            workers.submit(runtime.close).result(timeout=3)
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="closing or closed"):
+            submission.result(timeout=5)
+    assert not called.is_set()
 
 
 def test_failed_loop_start_does_not_leave_thread(monkeypatch: pytest.MonkeyPatch) -> None:

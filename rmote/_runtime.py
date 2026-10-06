@@ -89,7 +89,7 @@ class _Runtime:
         finally:
             with self._lock:
                 self._state = "closed"
-                requests = tuple(self._requests)
+                requests = self._requests.copy()
             for future in requests:
                 if error is None:
                     future.cancel()
@@ -225,24 +225,28 @@ class _Runtime:
     def submit(self, factory: Callable[[], Coroutine[Any, Any, R]]) -> Future[R]:
         """Schedule a coroutine factory without invoking it in the caller's thread."""
         self._check_thread()
-        with self._lock:
-            if self._state != "open":
-                raise RuntimeError("Runtime is closing or closed")
-            assert self._loop is not None
-            future: Future[R] = Future()
+        future: Future[R] = Future()
+        try:
+            # Prepare the future before publishing it: an interrupt inside
+            # add_done_callback can leave its lock held by the caller.
+            future.add_done_callback(self._request_done)
             if threading.current_thread() is threading.main_thread():
                 gate = threading.Lock()
                 gate.acquire()
                 self._gates[future] = gate
+            # Do not acquire the runtime lock here: SIGINT during acquisition
+            # can leave it held. Publish before checking the state so shutdown
+            # either sees this request in its snapshot or submission rejects it.
             self._requests.add(future)
-            future.add_done_callback(self._request_done)
-            try:
-                self._loop.call_soon_threadsafe(self._start, factory, future)
-            except BaseException:
-                self._requests.discard(future)
-                self._gates.pop(future, None)
-                raise
-            return future
+            if self._state != "open":
+                raise RuntimeError("Runtime is closing or closed")
+            assert self._loop is not None
+            self._loop.call_soon_threadsafe(self._start, factory, future)
+        except BaseException:
+            self._requests.discard(future)
+            self._gates.pop(future, None)
+            raise
+        return future
 
     def run(self, factory: Callable[[], Coroutine[Any, Any, R]], *, timeout: float | None = None) -> R:
         """Wait for a result; timeout or interruption cancels the local operation."""
