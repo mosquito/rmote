@@ -6,6 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.ssh_agent import agent as agent
+
+
+@pytest.fixture
+def docs_ssh_agent(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run forwarding examples with an isolated agent, never the user's agent."""
+    isolated_agent = request.getfixturevalue("agent")
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(isolated_agent[0]))
+
 
 @pytest.fixture
 def tool_examples(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:

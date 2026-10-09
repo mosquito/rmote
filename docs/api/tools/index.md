@@ -8,6 +8,9 @@ Tools use that connection's user permissions and the programs installed there.
 `FileSync.upload/download` and `Rsync.upload/download` coordinate local and remote files:
 call them directly with an open async `Protocol`. See {doc}`file_sync` and {doc}`rsync`.
 
+`Agent.forward` is an async context manager called directly. It connects an
+agent and a listener on independently selected endpoints. See {doc}`agent`.
+
 `facts.fetch(remote, ...)` collects host state through an open async connection;
 `await remote(facts.gather, ...)` collects it in one remote call. See {doc}`facts`.
 
@@ -30,7 +33,8 @@ AptRepository.absent needs /etc/apt of Debian and Ubuntu, and this host has none
 
 | Tool | Needs |
 | --- | --- |
-| `FileSystem`, `Exec`, `Template`, `FileSync`, `Rsync`, `Logger`, `Quit` | any POSIX target |
+| `FileSystem`, `Files`, `Exec`, `Template`, `FileSync`, `Rsync`, `Logger`, `Quit` | any POSIX target |
+| `Agent` | POSIX Unix sockets; an existing SSH agent on the selected agent endpoint |
 | `Hostname` | `get` and `hosts_entry` any target; `set` the `/proc/sys` interface of Linux |
 | `Sysctl` | the `/proc/sys` interface of Linux; `absent` only edits the persistent file |
 | `Service` | the `systemctl` program of systemd |
@@ -47,6 +51,7 @@ the same message.
 :caption: Files and templates
 
 filesystem
+files
 file_sync
 rsync
 template
@@ -59,6 +64,7 @@ template
 exec
 service
 vty
+agent
 ```
 
 ```{toctree}

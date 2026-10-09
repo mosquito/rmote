@@ -1,8 +1,10 @@
 from rmote.tools import facts
+from rmote.tools.agent import Agent
 from rmote.tools.apt import Apt
 from rmote.tools.apt_repository import AptRepository
 from rmote.tools.exec import Exec
 from rmote.tools.file_sync import FileSync
+from rmote.tools.files import Files
 from rmote.tools.fs import FileSystem
 from rmote.tools.hostname import Hostname
 from rmote.tools.logger import Logger
@@ -18,11 +20,13 @@ from rmote.tools.vty import Vty
 
 __all__ = (
     "facts",
+    "Agent",
     "Apt",
     "AptRepository",
     "Exec",
     "FileSystem",
     "FileSync",
+    "Files",
     "Hostname",
     "Logger",
     "Pacman",
