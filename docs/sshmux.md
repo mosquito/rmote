@@ -34,6 +34,26 @@ printf 'hello\n' | ssh -S /tmp/my-rmote.sock user@server cat
 The server runs in the foreground. Exiting one shell closes only its Vty.
 There are no detached sessions to reconnect to.
 
+## Message of the day
+
+Use `--motd` to show the remote host's message of the day before each shell
+session with a PTY:
+
+```bash
+rmote sshmux --motd --socket /tmp/my-rmote.sock -- ssh user@server
+```
+
+The remote terminal launcher reads `/run/motd.dynamic`, then `/etc/motd`,
+before starting the login shell. It skips missing, unreadable, and non-regular
+files. If both paths refer to the same file, it displays that file once.
+`~/.hushlogin` on the remote host suppresses the message.
+
+MOTD is off by default. Commands, including commands with `ssh -t`, SFTP,
+and shells without a PTY do not receive it. The option only displays existing
+files: it does not call PAM or run scripts to regenerate the message.
+The host must update dynamic MOTD separately. If the mux server is already
+running, start a new server or use another socket to apply `--motd`.
+
 ## Automatic startup from SSH config
 
 `-d` / `--daemon` starts the server in the background and returns after its transport
