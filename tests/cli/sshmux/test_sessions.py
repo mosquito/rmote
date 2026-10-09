@@ -136,14 +136,14 @@ def test_sigterm_closes_server_and_active_clients(server: Server):
 
 
 def test_subsystem_is_explicitly_rejected(server: Server):
-    result = server.run("-s", "host", "sftp")
+    result = server.run("-s", "host", "unknown-subsystem")
     assert result.returncode != 0
-    assert b"Subsystems are not supported" in result.stderr
+    assert b"Unknown subsystem" in result.stderr
 
 
 @pytest.mark.parametrize(
     ("options", "warning"),
-    [("-A", b"agent forwarding"), ("-X", b"X11 forwarding"), ("-AX", b"agent and X11 forwarding")],
+    [("-A", b"agent forwarding unavailable"), ("-X", b"X11 forwarding"), ("-AX", b"X11 forwarding")],
     ids=["agent", "x11", "both"],
 )
 def test_optional_forwarding_does_not_block_the_session(server: Server, options: str, warning: bytes):
@@ -151,7 +151,7 @@ def test_optional_forwarding_does_not_block_the_session(server: Server, options:
     assert result.returncode == 7
     assert result.stdout == b"connected"
     assert warning in result.stderr
-    assert b"continuing without forwarding" in result.stderr
+    assert b"continuing without" in result.stderr
     assert b"session request failed" not in result.stderr
 
 

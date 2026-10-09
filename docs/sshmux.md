@@ -4,6 +4,10 @@
 client gets a separate {doc}`Vty session <api/tools/vty>`, and all sessions
 share one rmote connection to the target.
 
+Standard `sftp` clients can use the same control socket. SFTP requires only
+Python 3.11+ and its standard library on the target POSIX host. No remote
+installation of `rmote` or `sftp-server` is needed.
+
 Start the server in one terminal:
 
 ```bash
@@ -227,15 +231,128 @@ guarantee cleanup of processes on that host.
 
 ## Supported OpenSSH requests
 
-This initial implementation supports the OpenSSH mux v4 passenger protocol:
+`rmote sshmux` supports the OpenSSH mux v4 passenger protocol:
 shell and exec sessions, health checks and master termination. It requires
 POSIX on both sides and an OpenSSH client locally; the remote Python needs no
 third-party packages.
 
-Agent and X11 forwarding are not implemented. If your SSH configuration enables
-them, the client receives a warning and the shell opens without forwarding.
-Use `ssh -a -x` to disable these requests and their warnings explicitly.
+## Agent forwarding
 
-Subsystems (including SFTP), port forwarding, mux proxy mode and `ssh -O stop`
-are not implemented and receive a failure response.
+To forward an agent, start the mux server with `SSH_AUTH_SOCK`
+pointing to your local agent, then request forwarding for a shell or command:
+
+```console
+ssh -A container ssh-add -L
+```
+
+To select a known local agent socket explicitly, use `--agent-socket` when
+starting the mux server. It overrides `SSH_AUTH_SOCK`:
+
+```bash
+rmote sshmux --socket /tmp/container.sock --agent-socket /path/to/agent.sock -- docker exec -i my-container
+ssh -A -S /tmp/container.sock -o ProxyCommand=false container ssh-add -L
+```
+
+The option also works with `--daemon`. Changing it requires restarting an
+existing mux server. Clients must still request forwarding with `-A` or
+`ForwardAgent yes`.
+
+The forwarded agent belongs to the mux server process. The mux request does
+not carry the connecting client's agent path. If you change `SSH_AUTH_SOCK`,
+restart the mux server to select the new agent. Each forwarded session has a
+private remote Unix socket and up to 32 agent connections. Closing the session
+closes those connections and removes its socket and temporary directory.
+Forcibly terminating the remote interpreter can leave the temporary directory
+behind, though its sockets can no longer forward requests.
+An unavailable local agent produces a warning; the shell still opens.
+Without `-A` or `ForwardAgent yes`, the shell receives no agent socket,
+including one inherited by the remote Python process.
+
+This is a byte bridge to the agent. It does not create an OpenSSH
+`session-bind@openssh.com` binding for the rmote hop, which has no SSH host key
+or key-exchange signature. Do not rely on destination constraints to validate
+this forwarding hop, or on agent restrictions that require identifying a
+connection as forwarded. See OpenSSH's
+[agent protocol extensions](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.agent).
+
+X11 forwarding is not implemented. A request produces a warning and the shell
+opens without X11 forwarding. Use `ssh -x` to disable the request.
+
+The public `Agent` Tool also supports reverse forwarding and forwarding between
+two remote endpoints. Select the listener and agent independently:
+
+```python
+from rmote.tools import Agent
+
+# Local agent available through a remote socket.
+async with Agent.forward(listener=remote) as remote_socket:
+    ...
+
+# Remote agent available through a local socket.
+async with Agent.forward(agent=remote) as local_socket:
+    ...
+
+# Use a known agent socket on the remote endpoint.
+async with Agent.forward(agent=remote, path="/run/user/1000/ssh-agent.sock") as local_socket:
+    ...
+
+# Agent on host B available through a socket on host A.
+async with Agent.forward(listener=host_a, agent=host_b) as socket_on_a:
+    ...
+```
+
+Each endpoint is an open `Protocol`; an omitted endpoint means the current
+Python process. `path=` selects the agent socket on the agent endpoint. Without
+it, the Tool reads that endpoint's `SSH_AUTH_SOCK`. Set the consuming process's
+`SSH_AUTH_SOCK` to the yielded listener path. Both endpoint sessions and their
+connections are released when the context exits. The coordinator relays bytes
+through the selected Protocol connections. The same session-binding limitation
+described above applies in every direction.
+See the {doc}`Agent API <api/tools/agent>` for runnable examples and the
+operations used to manage sessions and connections.
+
+## SFTP without a remote SFTP server
+
+The `sftp` subsystem supports SFTP v3. The target POSIX host
+needs only Python 3.11+ and its standard library: no `sftp-server`, installed
+`rmote` package, or additional Python packages. rmote transfers the required
+Python code automatically and performs file operations through it.
+
+SFTP uses the existing rmote transport. With Docker or Kubernetes exec, the
+target does not need OpenSSH or `sshd`. If you choose SSH as the transport,
+`sshd` is still required for that connection, but its SFTP subsystem is not used.
+The OpenSSH `sftp` client runs locally.
+
+With the SSH configuration above, connect with:
+
+```console
+sftp container
+```
+
+Without an SSH config entry, specify the control socket explicitly:
+
+```console
+sftp -o ControlPath=~/.ssh/container.sock -o ProxyCommand=false container
+```
+
+The backend supports regular file reads and writes, resume, directory listing,
+rename, symbolic links, and file attributes. It also supports the OpenSSH
+`posix-rename` and `fsync` extensions. File changes are applied directly; uploads
+do not use FileSync's atomic replacement or block comparison. Paths use the
+remote Python process's working directory and permissions.
+
+Each SFTP session owns up to 128 file and directory handles. Requests run in
+order, one at a time per session, with reads and writes limited to 256 KiB.
+Closing the session releases its handles, including when the mux client
+disconnects. Sequential requests limit transfer throughput on connections
+with high latency. Special files, extended attributes, and
+unadvertised SFTP extensions are not supported.
+
+For direct Python file access, see the {doc}`Files API <api/tools/files>`.
+It documents session ownership, descriptor cleanup, and `OpenFlags`.
+
+## Other requests
+
+Other subsystems, port forwarding, mux proxy mode and `ssh -O stop` are not
+implemented and receive a failure response.
 The adapter does not implement an SSH network server or SSH authentication.

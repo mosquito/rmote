@@ -27,8 +27,10 @@ from enum import IntEnum
 from pathlib import Path
 from typing import BinaryIO
 
+from rmote.cli.sftp import SftpServer
 from rmote.cli.shell import EscapeFilter, NonBlocking, regular_file, terminal_size, wait_readable, write_all
 from rmote.protocol import Protocol
+from rmote.tools.agent import Agent
 from rmote.tools.vty import Vty, launcher_source
 
 log = logging.getLogger(__name__)
@@ -253,8 +255,44 @@ class MuxClient:
         request = self.request
         assert request is not None
         if request.subsystem:
-            await self.send(Message.FAILURE, request_id, "Subsystems are not supported")
+            if request.command != "sftp":
+                await self.send(Message.FAILURE, request_id, "Unknown subsystem")
+                return
+            if request.tty:
+                await self.send(Message.FAILURE, request_id, "SFTP does not support a terminal")
+                return
+            await self.sftp(request_id)
             return
+        for fd in self.fds:
+            item = NonBlocking(fd)
+            item.enter()
+            self.flags.append(item)
+        # A non-forwarded session must not inherit the bootstrap process's
+        # agent, including for local and nested-SSH transports. Client SetEnv
+        # cannot override the session's forwarding decision.
+        env = dict(request.env, SSH_AUTH_SOCK="", SSH_AGENT_PID="")
+        async with contextlib.AsyncExitStack() as resources:
+            if request.agent:
+                path = self.server.agent_path
+                try:
+                    if not path:
+                        raise OSError("SSH_AUTH_SOCK is not set for the mux server")
+                    env["SSH_AUTH_SOCK"] = await resources.enter_async_context(
+                        Agent.forward(listener=self.server.protocol, path=path)
+                    )
+                except (OSError, ValueError, TimeoutError) as error:
+                    warning = f"rmote sshmux: agent forwarding unavailable ({error}); continuing without forwarding.\n"
+                    await write_all(self.fds[2], warning.encode())
+            if request.x11:
+                await write_all(
+                    self.fds[2],
+                    b"rmote sshmux: X11 forwarding is not supported; continuing without X11 forwarding.\n",
+                )
+            await self.shell_session(request_id, env)
+
+    async def shell_session(self, request_id: int, env: dict[str, str]) -> None:
+        request = self.request
+        assert request is not None
         rows, cols = terminal_size(self.fds[0], self.fds[1])
         opening = asyncio.create_task(
             self.server.protocol(
@@ -263,7 +301,7 @@ class MuxClient:
                 rows=rows,
                 cols=cols,
                 term=request.term,
-                env=request.env,
+                env=env,
                 want_pty=request.tty,
                 launcher=self.server.launcher,
             )
@@ -286,17 +324,6 @@ class MuxClient:
             await self.send(Message.FAILURE, request_id, str(error))
             return
         try:
-            for fd in self.fds:
-                item = NonBlocking(fd)
-                item.enter()
-                self.flags.append(item)
-            forwarding = [name for name, enabled in (("agent", request.agent), ("X11", request.x11)) if enabled]
-            if forwarding:
-                warning = (
-                    f"rmote sshmux: {' and '.join(forwarding)} forwarding is not supported; "
-                    "continuing without forwarding.\n"
-                )
-                await write_all(self.fds[2], warning.encode())
             await self.send(Message.SESSION_OPENED, request_id, self.key)
             status = await self.bridge()
             await self.send(Message.EXIT_MESSAGE, self.key, status if status >= 0 else 128 - status)
@@ -307,6 +334,36 @@ class MuxClient:
                 async with asyncio.timeout(8):
                     await self.server.protocol(Vty.close, self.key)
             self.key = None
+
+    async def sftp(self, request_id: int) -> None:
+        for fd in self.fds:
+            item = NonBlocking(fd)
+            item.enter()
+            self.flags.append(item)
+
+        async def read(size: int) -> bytes:
+            return await read_fd(self.fds[0], size)
+
+        async def write(data: bytes) -> None:
+            await write_all(self.fds[1], data)
+
+        # Session ids are local to a control connection. SFTP uses no Vty key.
+        await self.send(Message.SESSION_OPENED, request_id, 0)
+        session = asyncio.create_task(SftpServer(self.server.protocol, read, write).run())
+        disconnected = asyncio.create_task(self.loop.sock_recv(self.connection, 1))
+        try:
+            done, _ = await asyncio.wait({session, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+            if session in done:
+                try:
+                    status = session.result()
+                except (ValueError, OSError) as error:
+                    await write_all(self.fds[2], f"rmote sshmux: {error}\n".encode())
+                    status = 1
+                await self.send(Message.EXIT_MESSAGE, 0, status)
+        finally:
+            session.cancel()
+            disconnected.cancel()
+            await asyncio.gather(session, disconnected, return_exceptions=True)
 
     async def input(self) -> bool:
         assert self.key is not None
@@ -378,8 +435,11 @@ class MuxServer:
     run() owns accepted sockets and removes only the socket it created.
     """
 
-    def __init__(self, protocol: Protocol, path: str, idle_timeout: float = 0) -> None:
+    def __init__(
+        self, protocol: Protocol, path: str, idle_timeout: float = 0, *, agent_socket: str | None = None
+    ) -> None:
         self.protocol = protocol
+        self.agent_path = os.environ.get("SSH_AUTH_SOCK", "") if agent_socket is None else agent_socket
         self.path = Path(path)
         self.launcher = launcher_source()
         self.stopping = asyncio.Event()
@@ -485,11 +545,12 @@ async def serve(
     *,
     idle_timeout: float = 0,
     ready: BinaryIO | None = None,
+    agent_socket: str | None = None,
 ) -> None:
     """Connect once, then serve until stopped, disconnected or idle."""
     protocol = await Protocol.from_command(*transport, python=python)
     async with protocol:
-        server = MuxServer(protocol, path, idle_timeout)
+        server = MuxServer(protocol, path, idle_timeout, agent_socket=agent_socket)
         loop = asyncio.get_running_loop()
         previous = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGHUP)}
         try:
@@ -710,8 +771,10 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "  ssh -S ~/.ssh/container.sock -O exit container\n"
         "  Ctrl-C in the server terminal also closes all sessions and the socket.\n\n"
         "Supports shell/exec, PTYs, resize and exit status on POSIX. "
-        "SFTP and port forwarding are not supported. Agent/X11 forwarding "
-        "requests produce a warning; the shell still opens without forwarding."
+        "SFTP v3 uses remote Python file operations. "
+        "Agent forwarding (-A) uses --agent-socket or the mux server's SSH_AUTH_SOCK. "
+        "Port forwarding is not supported. X11 forwarding requests produce a warning; "
+        "the shell still opens without X11 forwarding."
     )
     parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument("-S", "--socket", required=True, help="Local UNIX control socket (reused with --daemon).")
@@ -727,6 +790,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help="Stop after this many seconds without clients; 0 keeps the server running.",
     )
     parser.add_argument("-p", "--python", default="python3", help="Remote Python executable.")
+    parser.add_argument(
+        "--agent-socket",
+        metavar="PATH",
+        help="Local SSH agent socket; overrides SSH_AUTH_SOCK. Clients must request forwarding with -A.",
+    )
     parser.add_argument("-v", "--debug", action="store_true", help="Log protocol activity to stderr.")
     parser.add_argument(
         "transport",
@@ -745,7 +813,16 @@ def run(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(name)s: %(message)s")
 
     def start(ready: BinaryIO | None = None) -> None:
-        asyncio.run(serve(path, transport, args.python, idle_timeout=args.idle_timeout, ready=ready))
+        asyncio.run(
+            serve(
+                path,
+                transport,
+                args.python,
+                idle_timeout=args.idle_timeout,
+                ready=ready,
+                agent_socket=args.agent_socket,
+            )
+        )
 
     try:
         if args.daemon:
