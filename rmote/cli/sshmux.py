@@ -303,7 +303,7 @@ class MuxClient:
                 term=request.term,
                 env=env,
                 want_pty=request.tty,
-                launcher=self.server.launcher,
+                launcher=self.server.motd_launcher if request.tty and not request.command else self.server.launcher,
             )
         )
         try:
@@ -435,13 +435,22 @@ class MuxServer:
     run() owns accepted sockets and removes only the socket it created.
     """
 
+    motd_paths: tuple[Path, ...] = (Path("/run/motd.dynamic"), Path("/etc/motd"))
+
     def __init__(
-        self, protocol: Protocol, path: str, idle_timeout: float = 0, *, agent_socket: str | None = None
+        self,
+        protocol: Protocol,
+        path: str,
+        idle_timeout: float = 0,
+        *,
+        agent_socket: str | None = None,
+        motd: bool = False,
     ) -> None:
         self.protocol = protocol
         self.agent_path = os.environ.get("SSH_AUTH_SOCK", "") if agent_socket is None else agent_socket
         self.path = Path(path)
         self.launcher = launcher_source()
+        self.motd_launcher = launcher_source(motd_paths=self.motd_paths if motd else ())
         self.stopping = asyncio.Event()
         self.ready = asyncio.Event()
         self.activity = asyncio.Event()
@@ -546,11 +555,12 @@ async def serve(
     idle_timeout: float = 0,
     ready: BinaryIO | None = None,
     agent_socket: str | None = None,
+    motd: bool = False,
 ) -> None:
     """Connect once, then serve until stopped, disconnected or idle."""
     protocol = await Protocol.from_command(*transport, python=python)
     async with protocol:
-        server = MuxServer(protocol, path, idle_timeout, agent_socket=agent_socket)
+        server = MuxServer(protocol, path, idle_timeout, agent_socket=agent_socket, motd=motd)
         loop = asyncio.get_running_loop()
         previous = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGHUP)}
         try:
@@ -791,6 +801,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("-p", "--python", default="python3", help="Remote Python executable.")
     parser.add_argument(
+        "--motd",
+        action="store_true",
+        help="Show remote /run/motd.dynamic and /etc/motd before shells with a PTY; respect ~/.hushlogin.",
+    )
+    parser.add_argument(
         "--agent-socket",
         metavar="PATH",
         help="Local SSH agent socket; overrides SSH_AUTH_SOCK. Clients must request forwarding with -A.",
@@ -821,6 +836,7 @@ def run(args: argparse.Namespace) -> int:
                 idle_timeout=args.idle_timeout,
                 ready=ready,
                 agent_socket=args.agent_socket,
+                motd=args.motd,
             )
         )
 

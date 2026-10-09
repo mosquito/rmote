@@ -22,6 +22,7 @@ import sys
 import termios
 import textwrap
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from rmote.protocol import Tool
@@ -69,7 +70,7 @@ async def end_process(process: asyncio.subprocess.Process) -> None:
             continue
 
 
-def take_controlling_terminal() -> None:
+def take_controlling_terminal(motd_paths: tuple[Path, ...] = ()) -> None:
     """Take the controlling terminal, then run the requested command.
 
     The function runs as a fresh interpreter after exec, so the process has
@@ -82,6 +83,7 @@ def take_controlling_terminal() -> None:
     """
     import fcntl
     import os
+    import stat
     import sys
     import termios
 
@@ -90,6 +92,23 @@ def take_controlling_terminal() -> None:
     except OSError as error:
         sys.stderr.write(f"rmote: no controlling terminal: {error}\n")
 
+    if motd_paths and not (Path.home() / ".hushlogin").exists():
+        seen: set[tuple[int, int]] = set()
+        for path in motd_paths:
+            try:
+                metadata = path.stat()
+                identity = metadata.st_dev, metadata.st_ino
+                # Skip directories and FIFOs before opening the file.
+                if not stat.S_ISREG(metadata.st_mode) or identity in seen:
+                    continue
+                with path.open("rb") as stream:
+                    seen.add(identity)
+                    while chunk := stream.read(65536):
+                        sys.stdout.buffer.write(chunk)
+            except OSError:
+                continue
+        sys.stdout.buffer.flush()
+
     try:
         os.execvp(sys.argv[1], sys.argv[1:])
     except OSError as error:
@@ -97,15 +116,23 @@ def take_controlling_terminal() -> None:
         raise SystemExit(127) from error
 
 
-def launcher_source() -> str:
+def launcher_source(*, motd_paths: tuple[Path, ...] = ()) -> str:
     """Return the launcher as source that ``python -c`` can run.
 
     The launcher has to be a fresh interpreter, so it travels as text. The
     text comes from the function itself, which keeps one definition that the
     linter and the type checker also read. A transferred module has no file,
     so only the side that holds the file can produce the text.
+
+    The child displays files from motd_paths before exec. Callers must supply
+    paths only for interactive login shells.
     """
-    return textwrap.dedent(inspect.getsource(take_controlling_terminal)) + "\n\ntake_controlling_terminal()\n"
+    paths = tuple(str(path) for path in motd_paths)
+    return (
+        "from pathlib import Path\n\n"
+        + textwrap.dedent(inspect.getsource(take_controlling_terminal))
+        + f"\n\ntake_controlling_terminal(tuple(Path(path) for path in {paths!r}))\n"
+    )
 
 
 def set_winsize(fd: int, rows: int, cols: int) -> None:
