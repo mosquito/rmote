@@ -2,9 +2,9 @@
 
 Pass a `TLSConfig` to protect the rmote byte stream with TLS 1.3. Serialization,
 compression, headers, and frames all run above TLS. The configuration is opt-in;
-Python connections without it keep their existing behavior. The `sshmux` CLI
-also enables TLS automatically when it finds a complete local certificate and
-key pair; see {doc}`sshmux` for its TLS options and XDG defaults.
+Python connections without it keep their existing behavior. The `shell`, `repl`,
+`rsync`, and `sshmux` commands enable TLS automatically when they find a complete
+local certificate and key pair. Use `--no-tls` to disable that automatic choice.
 
 Both processes need Python with the standard-library `ssl` module and TLS 1.3
 support in OpenSSL. No third-party Python package is needed on either side.
@@ -37,6 +37,42 @@ A Telnet transport would need an adapter that handles those commands and
 preserves binary data in both directions. rmote does not provide that adapter.
 TLS inside rmote would not protect Telnet login credentials or other data sent
 before the TLS handshake.
+
+## CLI options
+
+The `shell`, `repl`, `rsync`, and `sshmux` commands share these options:
+
+| Option | Default |
+| --- | --- |
+| `--tls-cert PATH` | Existing `controller.crt` in the rmote TLS directory |
+| `--tls-key PATH` | Existing `controller.key` in the same directory |
+| `--tls-ca PATH` | Existing `controller-ca.crt`, or the selected certificate |
+| `--tls-hostname NAME` | Current controller hostname |
+| `--no-tls` | Disable TLS, including stored certificates |
+
+The directory is `$XDG_DATA_HOME/rmote/tls`, with `~/.local/share/rmote/tls` as
+its fallback. Each command's `--help` shows existing file paths as defaults.
+Without a complete default certificate and key pair, the command uses plaintext.
+An explicitly supplied missing file is an error. Invalid credentials or a failed
+handshake stop the connection; they never cause a fallback to plaintext.
+
+For example, generate credentials once and use them with either command:
+
+```sh
+rmote certs
+rmote shell ssh host
+rmote repl ssh host
+```
+
+To bypass stored credentials for one connection:
+
+```sh
+rmote shell --no-tls ssh host
+```
+
+Do not combine `--no-tls` with explicit certificate, key, or CA arguments.
+Use `--tls-hostname` if the certificate contains a name other than the current
+controller hostname.
 
 ## Controller certificate
 

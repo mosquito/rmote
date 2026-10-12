@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Protocol
+from rmote.protocol import BaseProtocol, Protocol, TLSConfig
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -78,29 +78,31 @@ async def test_blank_lines_add_nothing_to_the_reason():
 
 
 @pytest.mark.asyncio
-async def test_a_transport_that_speaks_and_dies_reports_its_words():
+async def test_a_transport_that_speaks_and_dies_reports_its_words(transport_tls: TLSConfig | None):
     # The transport replaces the interpreter, so it never reaches the boundary.
     with pytest.raises(ConnectionError, match="disk is full"):
-        async with await Protocol.from_command("sh", "-c", "echo 'disk is full'; exit 1", python=sys.executable):
+        async with await Protocol.from_command(
+            "sh", "-c", "echo 'disk is full'; exit 1", python=sys.executable, tls=transport_tls
+        ):
             pass
 
 
 @pytest.mark.asyncio
-async def test_a_silent_transport_still_reports_the_symptom():
+async def test_a_silent_transport_still_reports_the_symptom(transport_tls: TLSConfig | None):
     with pytest.raises(ConnectionError, match="before PROTOCOL READY"):
-        async with await Protocol.from_command("sh", "-c", "exit 1", python=sys.executable):
+        async with await Protocol.from_command("sh", "-c", "exit 1", python=sys.executable, tls=transport_tls):
             pass
 
 
 @pytest.mark.asyncio
-async def test_a_working_connection_is_unaffected():
-    async with await Protocol.from_command(python=sys.executable) as remote:
+async def test_a_working_connection_is_unaffected(transport_tls: TLSConfig | None):
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
         assert remote is not None
 
 
 @pytest.mark.asyncio
-async def test_a_failed_handshake_reaps_the_owned_process():
-    remote = await Protocol.from_command("sh", "-c", "exec 1>&- 2>&-; exec sleep 60")
+async def test_a_failed_handshake_reaps_the_owned_process(transport_tls: TLSConfig | None):
+    remote = await Protocol.from_command("sh", "-c", "exec 1>&- 2>&-; exec sleep 60", tls=transport_tls)
     process = remote._owned_process
     assert process is not None
     try:

@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Flags, FrameCompressor, FrameDecompressor, Protocol
+from rmote.protocol import BaseProtocol, Flags, FrameCompressor, FrameDecompressor, Protocol, TLSConfig
 from tests.support.tool_cases.compression_probe import CompressionProbe as Probe
 
 TEXT = b'{"host": "example", "available": true, "total_bytes": 16360236032}'
@@ -111,8 +111,8 @@ def test_a_corrupt_body_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_the_boundary_opens_the_codec_of_each_direction():
-    remote = await Protocol.from_command(python=sys.executable)
+async def test_the_boundary_opens_the_codec_of_each_direction(transport_tls: TLSConfig | None):
+    remote = await Protocol.from_command(python=sys.executable, tls=transport_tls)
     assert remote.deflate is None and remote.inflate is None
     async with remote:
         # The bootstrap and the boundary travel plain; the codecs serve what
@@ -123,9 +123,9 @@ async def test_the_boundary_opens_the_codec_of_each_direction():
 
 
 @pytest.mark.asyncio
-async def test_a_repeated_request_costs_less_every_time():
+async def test_a_repeated_request_costs_less_every_time(transport_tls: TLSConfig | None):
     """The frames of the same bytes shrink as the dictionary learns them."""
-    async with await Protocol.from_command(python=sys.executable) as remote:
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
         await remote(Probe.echo, b"warm")
         sizes: list[int] = []
         original = remote.writer.write
@@ -149,9 +149,9 @@ async def test_a_repeated_request_costs_less_every_time():
 
 
 @pytest.mark.asyncio
-async def test_random_bytes_keep_their_size_and_a_tool_can_say_so():
+async def test_random_bytes_keep_their_size_and_a_tool_can_say_so(transport_tls: TLSConfig | None):
     payload = os.urandom(64 * 1024)
-    async with await Protocol.from_command(python=sys.executable) as remote:
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
         assert await remote(Probe.echo, payload) == payload
         assert await remote.uncompressed(Probe.echo, payload) == payload
         # The dictionary still works for text after the random bytes passed it.

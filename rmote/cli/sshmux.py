@@ -27,9 +27,9 @@ from enum import IntEnum
 from pathlib import Path
 from typing import BinaryIO
 
-from rmote.cli.certs import default_directory
 from rmote.cli.sftp import SftpServer
 from rmote.cli.shell import EscapeFilter, NonBlocking, regular_file, terminal_size, wait_readable, write_all
+from rmote.cli.tls import configure_tls_parser, tls_config
 from rmote.protocol import Protocol, TLSConfig
 from rmote.tools.agent import Agent
 from rmote.tools.vty import Vty, launcher_source
@@ -737,47 +737,6 @@ def idle_seconds(value: str) -> float:
     return result
 
 
-def default_tls_file(name: str) -> Path | None:
-    """Find an existing stored TLS file."""
-    path = default_directory() / name
-    return path if path.is_file() else None
-
-
-class TLSFileAction(argparse.Action):
-    """Track explicit TLS paths separately from discovered argparse defaults."""
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: object,
-        option_string: str | None = None,
-    ) -> None:
-        setattr(namespace, self.dest, values)
-        namespace._tls_explicit = (*getattr(namespace, "_tls_explicit", ()), self.dest)
-
-
-def tls_config(args: argparse.Namespace) -> TLSConfig | None:
-    """Use complete stored credentials, or require valid explicitly selected files."""
-    explicit = getattr(args, "_tls_explicit", ())
-    for option in explicit:
-        path = getattr(args, option)
-        if not path.expanduser().is_file():
-            raise ValueError(f"--{option.replace('_', '-')} is not a file: {path}")
-    cert, key = args.tls_cert, args.tls_key
-    if cert is None or key is None or not cert.expanduser().is_file() or not key.expanduser().is_file():
-        if not explicit:
-            return None
-        raise ValueError("TLS requires both --tls-cert and --tls-key, or their files in the rmote XDG directory")
-    ca = args.tls_ca if "tls_ca" in explicit else default_tls_file("controller-ca.crt") or cert
-    return TLSConfig(
-        certfile=str(cert.expanduser()),
-        keyfile=str(key.expanduser()),
-        cafile=str(ca.expanduser()),
-        server_hostname=args.tls_hostname,
-    )
-
-
 def configure_parser(parser: argparse.ArgumentParser) -> None:
     """Register mux arguments and their handler on a subcommand parser."""
     parser.description = (
@@ -829,6 +788,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "Port forwarding is not supported. X11 forwarding requests produce a warning; "
         "the shell still opens without X11 forwarding."
     )
+    configure_tls_parser(parser)
     parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument("-S", "--socket", required=True, help="Local UNIX control socket (reused with --daemon).")
     parser.add_argument(
@@ -843,36 +803,6 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help="Stop after this many seconds without clients; 0 keeps the server running.",
     )
     parser.add_argument("-p", "--python", default="python3", help="Remote Python executable.")
-    parser.add_argument(
-        "--tls-ca",
-        type=Path,
-        action=TLSFileAction,
-        default=default_tls_file("controller-ca.crt") or default_tls_file("controller.crt"),
-        metavar="PATH",
-        help="Controller CA certificate; use the stored controller-ca.crt, or the selected TLS certificate.",
-    )
-    parser.add_argument(
-        "--tls-cert",
-        type=Path,
-        action=TLSFileAction,
-        default=default_tls_file("controller.crt"),
-        metavar="PATH",
-        help="Controller TLS certificate; use controller.crt in the rmote XDG data directory when present.",
-    )
-    parser.add_argument(
-        "--tls-key",
-        type=Path,
-        action=TLSFileAction,
-        default=default_tls_file("controller.key"),
-        metavar="PATH",
-        help="Controller TLS private key; use controller.key in the rmote XDG data directory when present.",
-    )
-    parser.add_argument(
-        "--tls-hostname",
-        default=socket.gethostname(),
-        metavar="NAME",
-        help="Controller name verified by the remote TLS client; must match the certificate.",
-    )
     parser.add_argument(
         "--motd",
         action="store_true",

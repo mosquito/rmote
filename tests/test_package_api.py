@@ -74,13 +74,15 @@ from rmote.tools.facts.collectors.network import NetworkInfo
 from rmote.tools.facts.collectors.python import PythonInfo
 from tempfile import TemporaryDirectory
 from pathlib import Path
-with Connection.from_local() as remote:
+from rmote.protocol import TLSConfig
+transport_tls = TLS_PLACEHOLDER
+with Connection.from_local(tls=transport_tls) as remote:
     assert remote(Checks.value, 7) == 7
     assert remote.call_with_timeout(5.0, Checks.report, 8) == Result(8)
     assert type(remote(PythonFacts.collect)) is PythonInfo
     assert type(remote.call_with_timeout(5.0, NetworkFacts.collect)) is NetworkInfo
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.process import async_process
 from rmote.templates import TEMPLATE_FILTERS, Template, TemplateFilter, TemplateProgram
 from rmote.template import Template as LegacyTemplate
@@ -96,7 +98,7 @@ async def asynchronous():
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        protocol = await Protocol.from_subprocess(process)
+        protocol = await Protocol.from_subprocess(process, tls=transport_tls)
         async with protocol:
             assert (await protocol(async_process, "echo", "ready", capture_output=True, text=True)).stdout.strip() == "ready"
             assert await protocol(Checks.value, 9) == 9
@@ -134,7 +136,7 @@ asyncio.run(asynchronous())
 TYPED_USAGE = """\
 from collections.abc import AsyncGenerator
 from typing import TypeVar, assert_type
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.sync import Connection
 from typing import Any
 from rmote.tools.facts.schema import Collector, FactsData
@@ -208,6 +210,7 @@ def distribution_artifacts(tmp_path_factory: pytest.TempPathFactory) -> dict[str
 @pytest.mark.parametrize("kind", ["wheel", "sdist"])
 @pytest.mark.timeout(180)
 def test_installed_distribution_exports_types_and_runs_both_clients(
+    transport_tls,
     kind: str,
     distribution_artifacts: dict[str, Path],
     tmp_path: Path,
@@ -239,7 +242,7 @@ def test_installed_distribution_exports_types_and_runs_both_clients(
     python = environment / "bin" / "python"
     run([uv, "pip", "install", "--python", str(python), "--no-deps", str(artifact)], tmp_path)
     (tmp_path / "probe_tools.py").write_text(textwrap.dedent(TOOLS))
-    (tmp_path / "probe.py").write_text(textwrap.dedent(SMOKE))
+    (tmp_path / "probe.py").write_text(textwrap.dedent(SMOKE).replace("TLS_PLACEHOLDER", repr(transport_tls)))
     run([str(python), "probe.py"], tmp_path)
 
     # Resolve imports from the clean installed environment, outside the repo.

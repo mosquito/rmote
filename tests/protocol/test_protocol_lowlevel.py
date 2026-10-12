@@ -17,6 +17,7 @@ from rmote.protocol import (
     LogDelivery,
     Protocol,
     RemoteLogHandler,
+    TLSConfig,
     Tool,
     bootstrap_packer,
     bootstrap_payload,
@@ -163,7 +164,7 @@ class TestBootstrapPacker:
         assert b"sys.modules['rmote.protocol']" in source
 
     @pytest.mark.asyncio
-    async def test_every_connection_receives_the_same_bootstrap(self) -> None:
+    async def test_every_connection_receives_the_same_bootstrap(self, transport_tls: TLSConfig | None) -> None:
         written: list[bytes] = []
         original = asyncio.StreamWriter.write
 
@@ -175,7 +176,7 @@ class TestBootstrapPacker:
         asyncio.StreamWriter.write = watched  # type: ignore[method-assign]
         try:
             for _ in range(2):
-                async with await Protocol.from_command(python=sys.executable) as remote:
+                async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
                     assert remote is not None
         finally:
             asyncio.StreamWriter.write = original  # type: ignore[method-assign]
@@ -185,7 +186,7 @@ class TestBootstrapPacker:
 
 class TestHighLevelProtocolEdgeCases:
     @pytest.mark.asyncio
-    async def test_protocol_context_manager_cleanup(self, fifo) -> None:
+    async def test_protocol_context_manager_cleanup(self, transport_tls: TLSConfig | None, fifo) -> None:
         class SlowTool(Tool):
             @staticmethod
             async def slow(path: str) -> None:
@@ -195,7 +196,7 @@ class TestHighLevelProtocolEdgeCases:
                     ready.write(b"x")
                 await asyncio.Event().wait()
 
-        async with await Protocol.from_command(python=sys.executable) as protocol:
+        async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as protocol:
             task = asyncio.create_task(protocol(SlowTool.slow, str(fifo.path)))
             assert await asyncio.to_thread(fifo.receive) == b"x"
             assert not task.done()

@@ -57,7 +57,7 @@ def cli(request: pytest.FixtureRequest) -> list[str]:
 
 
 def test_shell_dispatch_preserves_bytes_transport_and_exit_status(
-    cli: list[str], monkeypatch: pytest.MonkeyPatch
+    cli: list[str], monkeypatch: pytest.MonkeyPatch, tls_cli_args: list[str]
 ) -> None:
     # Check normal CLI output, independent of the parent test runner's timing
     # diagnostics. Debug-mode process cleanup is covered by protocol tests.
@@ -67,6 +67,7 @@ def test_shell_dispatch_preserves_bytes_transport_and_exit_status(
         [
             *cli,
             "shell",
+            *tls_cli_args,
             "--python",
             sys.executable,
             "--no-pty",

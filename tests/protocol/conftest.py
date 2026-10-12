@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest_asyncio
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from tests.support.transports import docker as docker
 from tests.support.transports import docker_image as docker_image
 from tests.support.transports import docker_protocol as docker_protocol
@@ -21,6 +21,6 @@ async def client():
 
 
 @pytest_asyncio.fixture
-async def isolated_remote(tmp_path):
-    async with subprocess_protocol(sys.executable, "-I", "-S", "-qui", cwd=tmp_path) as remote:
+async def isolated_remote(tmp_path, transport_tls: TLSConfig | None):
+    async with subprocess_protocol(sys.executable, "-I", "-S", "-qui", cwd=tmp_path, tls=transport_tls) as remote:
         yield remote

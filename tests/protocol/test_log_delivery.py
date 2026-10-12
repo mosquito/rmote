@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 
-from rmote.protocol import Flags, LogDelivery, LogRecord, Protocol, RemoteLogHandler
+from rmote.protocol import Flags, LogDelivery, LogRecord, Protocol, RemoteLogHandler, TLSConfig
 from tests.support.logging import Capture
 from tests.support.tool_cases.idle import Idle
 from tests.support.tool_cases.log_spam import LogSpam
@@ -107,9 +107,9 @@ def test_stopping_an_idle_delivery_does_nothing():
 
 
 @pytest.mark.asyncio
-async def test_a_burst_above_the_limit_travels_in_one_packet(capture):
+async def test_a_burst_above_the_limit_travels_in_one_packet(transport_tls: TLSConfig | None, capture):
     count = RemoteLogHandler.ATTACH_RECORDS + 16
-    async with await Counting.from_command(python=sys.executable) as remote:
+    async with await Counting.from_command(python=sys.executable, tls=transport_tls) as remote:
         assert await remote(LogSpam.speak_on_loop, count) == count
         await wait_for(capture, count)
         # The burst is above ATTACH_RECORDS, so it keeps its own packet. One
@@ -118,8 +118,8 @@ async def test_a_burst_above_the_limit_travels_in_one_packet(capture):
 
 
 @pytest.mark.asyncio
-async def test_a_record_of_a_call_travels_with_its_response(capture):
-    async with await Counting.from_command(python=sys.executable) as remote:
+async def test_a_record_of_a_call_travels_with_its_response(transport_tls: TLSConfig | None, capture):
+    async with await Counting.from_command(python=sys.executable, tls=transport_tls) as remote:
         for _ in range(20):
             assert await remote(LogSpam.speak_on_loop, 1) == 1
         await wait_for(capture, 20)
@@ -128,8 +128,8 @@ async def test_a_record_of_a_call_travels_with_its_response(capture):
 
 
 @pytest.mark.asyncio
-async def test_records_of_threaded_calls_are_delivered(capture):
-    async with await Protocol.from_command(python=sys.executable) as remote:
+async def test_records_of_threaded_calls_are_delivered(transport_tls: TLSConfig | None, capture):
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
         for _ in range(20):
             assert await remote(LogSpam.speak, 1) == 1
         await wait_for(capture, 20)
@@ -177,7 +177,7 @@ async def test_a_slow_handler_does_not_hold_up_calls(capture, isolated_remote, m
 
 
 @pytest.mark.asyncio
-async def test_records_sent_before_the_close_are_delivered(capture, monkeypatch):
+async def test_records_sent_before_the_close_are_delivered(transport_tls: TLSConfig | None, capture, monkeypatch):
     release = threading.Event()
     stopping = threading.Event()
     emit = capture.emit
@@ -187,7 +187,7 @@ async def test_records_sent_before_the_close_are_delivered(capture, monkeypatch)
         emit(item)
 
     monkeypatch.setattr(capture, "emit", blocked)
-    remote = await Protocol.from_command(python=sys.executable)
+    remote = await Protocol.from_command(python=sys.executable, tls=transport_tls)
     await remote.__aenter__()
     stop = remote._logs.stop
 

@@ -11,13 +11,19 @@ import pytest
 
 from rmote.cli import build_parser, main
 from rmote.cli.certs import default_directory
-from rmote.cli.sshmux import tls_config
+from rmote.cli.tls import tls_config
 from tests.cli.sshmux import test_daemon
 from tests.cli.sshmux.conftest import Server
 from tests.cli.sshmux.test_daemon import Daemon
 
 CERTS = Path(__file__).parents[2] / "fixtures" / "tls"
 daemon = test_daemon.daemon
+
+
+@pytest.fixture
+def tls_cli_args() -> list[str]:
+    # These tests select valid, missing, or invalid TLS credentials themselves.
+    return []
 
 
 def stored_credentials() -> Path:

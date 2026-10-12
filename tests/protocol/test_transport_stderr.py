@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Protocol
+from rmote.protocol import BaseProtocol, Protocol, TLSConfig
 from tests.support.synchronization import async_wait_until
 from tests.support.tool_cases.ping import Ping
 
@@ -30,17 +30,19 @@ FLOOD = 'i=0; while [ $i -lt 20000 ]; do echo "noise $i" >&2; i=$((i+1)); done &
 
 
 @pytest.mark.asyncio
-async def test_a_transport_that_speaks_on_stderr_explains_the_failure():
+async def test_a_transport_that_speaks_on_stderr_explains_the_failure(transport_tls: TLSConfig | None):
     """This is the Store alias of Windows: the transport says why and exits."""
-    protocol = await Protocol.from_command("sh", "-c", "echo 'Python was not found' >&2")
+    protocol = await Protocol.from_command("sh", "-c", "echo 'Python was not found' >&2", tls=transport_tls)
     with pytest.raises(ConnectionError, match="Its transport said: Python was not found"):
         async with protocol:
             pass
 
 
 @pytest.mark.asyncio
-async def test_transport_exits_before_the_ready_write():
-    remote = await Protocol.from_command("sh", "-c", "echo bootstrap-failed; echo transport-failed >&2; exit 3")
+async def test_transport_exits_before_the_ready_write(transport_tls: TLSConfig | None):
+    remote = await Protocol.from_command(
+        "sh", "-c", "echo bootstrap-failed; echo transport-failed >&2; exit 3", tls=transport_tls
+    )
     process = remote._owned_process
     assert process is not None
     await process.wait()
@@ -55,12 +57,12 @@ async def test_transport_exits_before_the_ready_write():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("close_stdout", [False, True])
-async def test_failed_ready_write_does_not_wait_for_open_output_pipes(close_stdout):
+async def test_failed_ready_write_does_not_wait_for_open_output_pipes(transport_tls: TLSConfig | None, close_stdout):
     script = "import os, threading; os.close(0); "
     if close_stdout:
         script += "os.close(1); "
     script += "os.write(2, b'transport-failed\\n'); threading.Event().wait()"
-    remote = await Protocol.from_command(sys.executable, "-c", script)
+    remote = await Protocol.from_command(sys.executable, "-c", script, tls=transport_tls)
     process = remote._owned_process
     assert process is not None
     try:
@@ -76,18 +78,22 @@ async def test_failed_ready_write_does_not_wait_for_open_output_pipes(close_stdo
 
 
 @pytest.mark.asyncio
-async def test_an_interpreter_that_cannot_start_explains_itself():
+async def test_an_interpreter_that_cannot_start_explains_itself(transport_tls: TLSConfig | None):
     """A missing module of the standard library is a fatal error on stderr."""
-    protocol = await Protocol.from_command(python=sys.executable, env={"PYTHONHOME": "/nonexistent-home"})
+    protocol = await Protocol.from_command(
+        python=sys.executable, env={"PYTHONHOME": "/nonexistent-home"}, tls=transport_tls
+    )
     with pytest.raises(ConnectionError, match="No module named 'encodings'"):
         async with protocol:
             pass
 
 
 @pytest.mark.asyncio
-async def test_a_transport_that_floods_its_stderr_keeps_the_calls_working():
+async def test_a_transport_that_floods_its_stderr_keeps_the_calls_working(transport_tls: TLSConfig | None):
     """The pipe is emptied, and only the last lines are kept."""
-    async with await Protocol.from_command("sh", "-c", FLOOD, "sh", python=sys.executable) as remote:
+    async with await Protocol.from_command(
+        "sh", "-c", FLOOD, "sh", python=sys.executable, tls=transport_tls
+    ) as remote:
         for _ in range(3):
             assert await remote(Ping.ping) == 1
         await async_wait_until(lambda: any("noise 19999" in line for line in remote.transport_said))
@@ -96,18 +102,20 @@ async def test_a_transport_that_floods_its_stderr_keeps_the_calls_working():
 
 
 @pytest.mark.asyncio
-async def test_a_discarded_stderr_is_not_read():
+async def test_a_discarded_stderr_is_not_read(transport_tls: TLSConfig | None):
     """A caller that asks for DEVNULL keeps it, and nothing is captured."""
-    async with await Protocol.from_command(python=sys.executable, stderr=asyncio.subprocess.DEVNULL) as remote:
+    async with await Protocol.from_command(
+        python=sys.executable, stderr=asyncio.subprocess.DEVNULL, tls=transport_tls
+    ) as remote:
         assert await remote(Ping.ping) == 1
         assert remote._stderr_task is None
         assert not remote.transport_said
 
 
 @pytest.mark.asyncio
-async def test_the_close_does_not_wait_for_the_capture():
+async def test_the_close_does_not_wait_for_the_capture(transport_tls: TLSConfig | None):
     """The task reads a pipe that ends with the transport, so it is cancelled."""
-    remote = await Protocol.from_command("sh", "-c", FLOOD, "sh", python=sys.executable)
+    remote = await Protocol.from_command("sh", "-c", FLOOD, "sh", python=sys.executable, tls=transport_tls)
     async with remote:
         assert await remote(Ping.ping) == 1
         task = remote._stderr_task
@@ -119,8 +127,8 @@ async def test_the_close_does_not_wait_for_the_capture():
 
 
 @pytest.mark.asyncio
-async def test_close_releases_paused_pipes_after_the_process_exits():
-    remote = await Protocol.from_command(python=sys.executable)
+async def test_close_releases_paused_pipes_after_the_process_exits(transport_tls: TLSConfig | None):
+    remote = await Protocol.from_command(python=sys.executable, tls=transport_tls)
     process = remote._owned_process
     assert process is not None
     transport = process._transport  # type: ignore[attr-defined]
@@ -141,7 +149,9 @@ async def test_close_releases_paused_pipes_after_the_process_exits():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ignore_term", [False, True], ids=["terminate", "kill"])
-async def test_close_reaps_the_process_before_closing_its_transport(ignore_term, caplog):
+async def test_close_reaps_the_process_before_closing_its_transport(
+    transport_tls: TLSConfig | None, ignore_term, caplog
+):
     script = "import os, signal; "
     if ignore_term:
         script += "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -149,7 +159,7 @@ async def test_close_reaps_the_process_before_closing_its_transport(ignore_term,
         script += "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM}); "
     script += "os.close(0); os.close(1); os.close(2); "
     script += "signal.pause()" if ignore_term else "signal.sigwait({signal.SIGTERM}); os._exit(23)"
-    remote = await Protocol.from_command(sys.executable, "-c", script)
+    remote = await Protocol.from_command(sys.executable, "-c", script, tls=transport_tls)
     process = remote._owned_process
     assert process is not None
     transport = process._transport  # type: ignore[attr-defined]

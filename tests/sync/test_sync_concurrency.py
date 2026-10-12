@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from rmote.protocol import Flags, Tool
+from rmote.protocol import Flags, TLSConfig, Tool
 from rmote.sync import Connection
 from tests.support.tool_cases.concurrent_tools import FirstCounter, SecondCounter
 from tests.support.tool_cases.idle import Idle
@@ -16,7 +16,7 @@ from tests.support.tool_cases.idle import Idle
 pytestmark = pytest.mark.timeout(15)
 
 
-def test_concurrent_first_call_preserves_results_exceptions_and_state(monkeypatch):
+def test_concurrent_first_call_preserves_results_exceptions_and_state(transport_tls: TLSConfig | None, monkeypatch):
     class Counter(Tool):
         count = 0
 
@@ -31,7 +31,7 @@ def test_concurrent_first_call_preserves_results_exceptions_and_state(monkeypatc
         def total(cls) -> int:
             return cls.count
 
-    remote = Connection.from_local()
+    remote = Connection.from_local(tls=transport_tls)
     all_started = threading.Event()
     release_holder = []
     syncs = []
@@ -94,8 +94,8 @@ def test_concurrent_first_call_preserves_results_exceptions_and_state(monkeypatc
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_concurrent_classes_from_one_module_share_state(capture_logs):
-    remote = Connection.from_local()
+def test_concurrent_classes_from_one_module_share_state(transport_tls: TLSConfig | None, capture_logs):
+    remote = Connection.from_local(tls=transport_tls)
     capture = capture_logs("rmote.remote.rmote-concurrent-module")
     workers = 12
     start = threading.Barrier(workers + 1)
@@ -120,7 +120,7 @@ def test_concurrent_classes_from_one_module_share_state(capture_logs):
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_close_finishes_concurrent_rpc_and_concurrent_closers():
+def test_close_finishes_concurrent_rpc_and_concurrent_closers(transport_tls: TLSConfig | None):
     class HeldTool(Tool):
         @staticmethod
         async def wait(token: int) -> None:
@@ -130,7 +130,7 @@ def test_close_finishes_concurrent_rpc_and_concurrent_closers():
             logging.getLogger("rmote-held-rpc").warning("started %s", token)
             await asyncio.Event().wait()
 
-    remote = Connection.from_local(close_timeout=0.1)
+    remote = Connection.from_local(close_timeout=0.1, tls=transport_tls)
     workers = 6
     pool = ThreadPoolExecutor(max_workers=workers + 3)
     all_started = threading.Event()
@@ -170,7 +170,7 @@ def test_close_finishes_concurrent_rpc_and_concurrent_closers():
         logger.removeHandler(handler)
 
 
-def test_logging_handler_reentry_fails_in_loop_thread_with_debug():
+def test_logging_handler_reentry_fails_in_loop_thread_with_debug(transport_tls: TLSConfig | None):
     class LogTool(Tool):
         @staticmethod
         def emit() -> str:
@@ -179,7 +179,7 @@ def test_logging_handler_reentry_fails_in_loop_thread_with_debug():
             logging.getLogger("rmote-reentry").warning("reentry record")
             return "done"
 
-    remote = Connection.from_local(env={**os.environ, "PYTHONASYNCIODEBUG": "1"})
+    remote = Connection.from_local(env={**os.environ, "PYTHONASYNCIODEBUG": "1"}, tls=transport_tls)
     handled = threading.Event()
     errors = []
     threads = []
@@ -215,14 +215,14 @@ def test_logging_handler_reentry_fails_in_loop_thread_with_debug():
         remote.close()
 
 
-def test_idle_logs_and_eof_are_processed_without_rpc(fifo, capture_logs):
+def test_idle_logs_and_eof_are_processed_without_rpc(transport_tls: TLSConfig | None, fifo, capture_logs):
     capture = capture_logs("rmote.remote.rmote-idle-test")
 
     async def wait_closed():
         assert remote._protocol is not None
         await asyncio.wait_for(remote._protocol.wait_closed(), timeout=5)
 
-    with Connection.from_local() as remote:
+    with Connection.from_local(tls=transport_tls) as remote:
         remote(Idle.log, str(fifo.path), "rmote-idle-test")
         fifo.send()
         capture.wait(1)

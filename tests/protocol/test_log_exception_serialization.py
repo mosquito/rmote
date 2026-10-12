@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from rmote.protocol import Flags, LogDelivery, LogRecord, Protocol, RemoteLogHandler, Tool
+from rmote.protocol import Flags, LogDelivery, LogRecord, Protocol, RemoteLogHandler, TLSConfig, Tool
 from rmote.sync import Connection
 
 pytestmark = pytest.mark.timeout(10)
@@ -150,7 +150,7 @@ async def test_send_failure_reaches_handler_error_callback(monkeypatch):
 
 
 @pytest.mark.parametrize("method", ["sync_log", "async_log"])
-def test_remote_tool_exception_log_preserves_chained_traceback(method):
+def test_remote_tool_exception_log_preserves_chained_traceback(transport_tls: TLSConfig | None, method):
     class ExceptionLogger(Tool):
         @staticmethod
         def sync_log() -> str:
@@ -185,7 +185,7 @@ def test_remote_tool_exception_log_preserves_chained_traceback(method):
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     logger.addHandler(handler)
     try:
-        with Connection.from_local() as remote:
+        with Connection.from_local(tls=transport_tls) as remote:
             assert remote(getattr(ExceptionLogger, method)) == "complete"
             assert delivered.wait(2)
         record, formatted = records[0]

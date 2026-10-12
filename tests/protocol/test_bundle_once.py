@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from rmote.protocol import Flags, Protocol
+from rmote.protocol import Flags, Protocol, TLSConfig
 
 
 @pytest.fixture
@@ -107,14 +107,16 @@ async def test_another_package_still_sends_its_own_bundle(packages, synced, isol
 
 
 @pytest.mark.asyncio
-async def test_a_new_connection_receives_the_bundle_again(packages, synced, isolated_remote):
+async def test_a_new_connection_receives_the_bundle_again(
+    transport_tls: TLSConfig | None, packages, synced, isolated_remote
+):
     package, _ = packages
     assert await isolated_remote(package.First.value) == "first:first"
     whole = chars(synced)
     synced.clear()
     # Deduplication holds for one connection, because the peer of the next one
     # knows nothing.
-    async with await Protocol.from_command(python=sys.executable) as other:
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as other:
         assert await other(package.Second.value) == "second:second"
     assert chars(synced) == whole
 

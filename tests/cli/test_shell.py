@@ -19,86 +19,98 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="requires a POSIX ter
 DRIVE_TIMEOUT = 60
 
 
-def drive_shell(
-    args: list[str],
-    script: bytes,
-    size: tuple[int, int] = (24, 80),
-    env: dict[str, str] | None = None,
-    ready_marker: bytes = b"RMOTE_SHELL_READY> ",
-) -> tuple[int, bytes]:
-    """Run rmote shell behind a terminal, feed *script*, collect the output.
+@pytest.fixture
+def drive_shell(tls_cli_args):
+    def invoke(
+        args: list[str],
+        script: bytes,
+        size: tuple[int, int] = (24, 80),
+        env: dict[str, str] | None = None,
+        ready_marker: bytes = b"RMOTE_SHELL_READY> ",
+    ) -> tuple[int, bytes]:
+        """Run rmote shell behind a terminal, feed *script*, collect the output.
 
-    The client needs a real terminal to enter raw mode, so the test owns the
-    master side and the client gets the slave side as its standard descriptors.
-    The script is sent after the shell prompt or the child's explicit marker.
-    """
-    master_fd, slave_fd = pty.openpty()
-    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+        The client needs a real terminal to enter raw mode, so the test owns the
+        master side and the client gets the slave side as its standard descriptors.
+        The script is sent after the shell prompt or the child's explicit marker.
+        """
+        master_fd, slave_fd = pty.openpty()
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
 
-    child_env = dict(os.environ)
-    child_env.setdefault("SHELL", "/bin/sh")
-    child_env["TERM"] = "xterm"
-    child_env["PS1"] = "RMOTE_SHELL_READY> "
-    if env:
-        child_env.update(env)
+        child_env = dict(os.environ)
+        child_env.setdefault("SHELL", "/bin/sh")
+        child_env["TERM"] = "xterm"
+        child_env["PS1"] = "RMOTE_SHELL_READY> "
+        if env:
+            child_env.update(env)
 
-    process = subprocess.Popen(
-        [sys.executable, "-m", "rmote", "shell", *args],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=child_env,
-    )
-    os.close(slave_fd)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "rmote", "shell", *tls_cli_args, *args],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=child_env,
+        )
+        os.close(slave_fd)
 
-    out = bytearray()
-    pending = script
-    deadline = time.monotonic() + DRIVE_TIMEOUT
-    try:
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master_fd], [], [], 0.5)
-            if ready:
-                try:
-                    chunk = os.read(master_fd, 65536)
-                except OSError:
+        out = bytearray()
+        pending = script
+        deadline = time.monotonic() + DRIVE_TIMEOUT
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.5)
+                if ready:
+                    try:
+                        chunk = os.read(master_fd, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    out += chunk
+                    if pending and ready_marker in out:
+                        os.write(master_fd, pending)
+                        pending = b""
+                    continue
+                if process.poll() is not None:
                     break
-                if not chunk:
-                    break
-                out += chunk
-                if pending and ready_marker in out:
-                    os.write(master_fd, pending)
-                    pending = b""
-                continue
-            if process.poll() is not None:
-                break
-        returncode = process.wait(timeout=15)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        os.close(master_fd)
-    return returncode, bytes(out)
+            returncode = process.wait(timeout=15)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(master_fd)
+        return returncode, bytes(out)
+
+    return invoke
 
 
-def run_piped(args: list[str], payload: bytes) -> subprocess.CompletedProcess[bytes]:
-    """Run rmote shell with pipes instead of a terminal."""
-    return subprocess.run(
-        [sys.executable, "-m", "rmote", "shell", *args],
-        input=payload,
-        capture_output=True,
-        timeout=DRIVE_TIMEOUT,
-    )
-
-
-def run_from_file(args: list[str], source) -> subprocess.CompletedProcess[bytes]:
-    """Run rmote shell with its input redirected from a regular file."""
-    with open(source, "rb") as handle:
+@pytest.fixture
+def run_piped(tls_cli_args):
+    def invoke(args: list[str], payload: bytes) -> subprocess.CompletedProcess[bytes]:
+        """Run rmote shell with pipes instead of a terminal."""
         return subprocess.run(
-            [sys.executable, "-m", "rmote", "shell", *args],
-            stdin=handle,
+            [sys.executable, "-m", "rmote", "shell", *tls_cli_args, *args],
+            input=payload,
             capture_output=True,
             timeout=DRIVE_TIMEOUT,
         )
+
+    return invoke
+
+
+@pytest.fixture
+def run_from_file(tls_cli_args):
+    def invoke(args: list[str], source) -> subprocess.CompletedProcess[bytes]:
+        """Run rmote shell with its input redirected from a regular file."""
+        with open(source, "rb") as handle:
+            return subprocess.run(
+                [sys.executable, "-m", "rmote", "shell", *tls_cli_args, *args],
+                stdin=handle,
+                capture_output=True,
+                timeout=DRIVE_TIMEOUT,
+            )
+
+    return invoke
 
 
 class TestEscapeFilter:
@@ -228,7 +240,7 @@ class TestHelpers:
 class TestTerminalSessionEndToEnd:
     """The client runs as a separate process behind a real terminal."""
 
-    def test_runs_a_command_and_returns_its_status(self) -> None:
+    def test_runs_a_command_and_returns_its_status(self, drive_shell) -> None:
         status, output = drive_shell(
             ["--python", sys.executable, "--command", "/bin/sh"],
             b"echo SHELL_MARKER_OK\nexit 3\n",
@@ -237,7 +249,7 @@ class TestTerminalSessionEndToEnd:
         assert b"SHELL_MARKER_OK" in output
         assert status == 3
 
-    def test_default_command_is_the_login_shell(self) -> None:
+    def test_default_command_is_the_login_shell(self, drive_shell) -> None:
         status, _ = drive_shell(
             ["--python", sys.executable],
             b"exit 5\n",
@@ -246,7 +258,7 @@ class TestTerminalSessionEndToEnd:
 
         assert status == 5
 
-    def test_local_window_size_reaches_the_remote_terminal(self) -> None:
+    def test_local_window_size_reaches_the_remote_terminal(self, drive_shell) -> None:
         status, output = drive_shell(
             ["--python", sys.executable, "--command", "/bin/sh"],
             b"stty size\nexit 0\n",
@@ -257,7 +269,7 @@ class TestTerminalSessionEndToEnd:
         assert status == 0
 
     @pytest.mark.parametrize("exit_status", [0, 37])
-    def test_escape_sequence_closes_the_session(self, exit_status: int) -> None:
+    def test_escape_sequence_closes_the_session(self, drive_shell, exit_status: int) -> None:
         # A shell can exit normally when closing the PTY gives it EOF. Use a
         # ready child with a known hangup status to check closure and forwarding.
         child = (
@@ -274,7 +286,7 @@ class TestTerminalSessionEndToEnd:
         assert b"session closed" in output
         assert status == exit_status
 
-    def test_escape_can_be_disabled(self) -> None:
+    def test_escape_can_be_disabled(self, drive_shell) -> None:
         status, output = drive_shell(
             ["--python", sys.executable, "--command", "/bin/sh", "--escape", ""],
             b"echo TILDE_TEST~.\nexit 0\n",
@@ -283,7 +295,7 @@ class TestTerminalSessionEndToEnd:
         assert b"session closed" not in output
         assert status == 0
 
-    def test_transport_command_wraps_the_interpreter(self) -> None:
+    def test_transport_command_wraps_the_interpreter(self, drive_shell) -> None:
         status, output = drive_shell(
             ["--python", sys.executable, "--command", "/bin/sh", "--", "env", "-u", "RMOTE_UNSET_ME"],
             b"echo VIA_TRANSPORT\nexit 0\n",
@@ -296,13 +308,13 @@ class TestTerminalSessionEndToEnd:
 class TestPipedSessionEndToEnd:
     """A redirected input gives pipes, so the bytes stay exactly as they are."""
 
-    def test_piped_input_reaches_the_command_and_ends(self) -> None:
+    def test_piped_input_reaches_the_command_and_ends(self, run_piped) -> None:
         result = run_piped(["--python", sys.executable, "--command", "cat"], b"piped payload\n")
 
         assert result.stdout == b"piped payload\n"
         assert result.returncode == 0
 
-    def test_piped_output_has_no_carriage_return(self) -> None:
+    def test_piped_output_has_no_carriage_return(self, run_piped) -> None:
         result = run_piped(
             [
                 "--python",
@@ -319,14 +331,14 @@ class TestPipedSessionEndToEnd:
         assert result.stdout == b"a\nb\n"
         assert result.returncode == 0
 
-    def test_binary_payload_passes_through(self) -> None:
+    def test_binary_payload_passes_through(self, run_piped) -> None:
         payload = bytes(range(256)) * 20
         result = run_piped(["--python", sys.executable, "--command", "cat"], payload)
 
         assert result.stdout == payload
         assert result.returncode == 0
 
-    def test_input_from_a_regular_file(self, tmp_path) -> None:
+    def test_input_from_a_regular_file(self, run_from_file, tmp_path) -> None:
         """A selector cannot watch a regular file, so this path is its own.
 
         The guide shows this form, and a wait on the descriptor would fail with
@@ -340,7 +352,7 @@ class TestPipedSessionEndToEnd:
         assert result.stdout == b"from a regular file\n"
         assert result.returncode == 0
 
-    def test_binary_file_redirect_passes_through(self, tmp_path) -> None:
+    def test_binary_file_redirect_passes_through(self, run_from_file, tmp_path) -> None:
         source = tmp_path / "input.bin"
         payload = bytes(range(256)) * 40
         source.write_bytes(payload)
@@ -350,7 +362,7 @@ class TestPipedSessionEndToEnd:
         assert result.stdout == payload
         assert result.returncode == 0
 
-    def test_exit_status_of_a_piped_command(self) -> None:
+    def test_exit_status_of_a_piped_command(self, run_piped) -> None:
         result = run_piped(
             ["--python", sys.executable, "--command", "/bin/sh", "--command=-c", "--command", "exit 7"],
             b"",

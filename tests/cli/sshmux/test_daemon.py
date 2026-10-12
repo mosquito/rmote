@@ -26,6 +26,7 @@ def wait_removed(path: Path) -> None:
 class Daemon:
     path: Path
     ssh: str
+    tls_args: list[str]
 
     def command(self, *args: str) -> list[str]:
         return [
@@ -33,6 +34,7 @@ class Daemon:
             "-m",
             "rmote",
             "sshmux",
+            *self.tls_args,
             "--daemon",
             "--socket",
             str(self.path),
@@ -53,12 +55,12 @@ class Daemon:
 
 
 @pytest.fixture
-def daemon():
+def daemon(tls_cli_args):
     ssh = shutil.which("ssh")
     if ssh is None:
         pytest.skip("requires OpenSSH")
     with tempfile.TemporaryDirectory(prefix="rmux-d-", dir="/tmp") as directory:
-        instance = Daemon(Path(directory) / "s", ssh)
+        instance = Daemon(Path(directory) / "s", ssh, tls_cli_args)
         try:
             yield instance
         finally:

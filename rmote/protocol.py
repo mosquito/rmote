@@ -997,6 +997,7 @@ class TLSStream(asyncio.Transport):
         self._closing = False
         self._error: Exception | None = None
         self._pump: asyncio.Task[None] | None = None
+        self._handshake_data = bytearray()
 
     def _flush(self) -> None:
         while self._outgoing.pending:
@@ -1013,6 +1014,7 @@ class TLSStream(asyncio.Transport):
                         await self._raw_writer.drain()
                         data = await self._raw_reader.read(65536)
                         if data:
+                            self._handshake_data.extend(data[: max(0, 4096 - len(self._handshake_data))])
                             self._incoming.write(data)
                         else:
                             self._incoming.write_eof()
@@ -1021,6 +1023,7 @@ class TLSStream(asyncio.Transport):
                         await self._raw_writer.drain()
                         break
             self._pump = asyncio.create_task(self._receive(), name="rmote-tls-reader")
+            self._handshake_data.clear()
         except BaseException:
             self.close()
             raise
@@ -1912,7 +1915,26 @@ class Protocol(BaseProtocol):
     async def __aenter__(self) -> Self:
         try:
             if self._tls_context is not None:
-                await self.start_tls(self._tls_context, server_side=True, timeout=self._tls_timeout)
+                raw_reader = self.reader
+                try:
+                    await self.start_tls(self._tls_context, server_side=True, timeout=self._tls_timeout)
+                except OSError as error:
+                    assert isinstance(self.writer, TLSStream)
+                    data = bytes(self.writer._handshake_data)
+                    # Preserve TLS alerts, including certificate failures. A peer
+                    # that never started TLS may instead send a plaintext reason.
+                    if data[:1] in (b"\x14", b"\x15", b"\x16", b"\x17") and isinstance(error, ssl.SSLError):
+                        raise
+                    if not data:
+                        try:
+                            async with asyncio.timeout(1):
+                                data = await raw_reader.read(self.MAX_START_FAILURE_TEXT)
+                        except (OSError, TimeoutError):
+                            pass
+                    said = data.decode(errors="replace").splitlines()
+                    raise ConnectionError(
+                        f"{self.start_failure(said, self.transport_said)}; TLS handshake failed: {error}"
+                    ) from error
             try:
                 await self.write_boundary()
             except OSError as error:

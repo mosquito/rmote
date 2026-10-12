@@ -17,7 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
-from rmote.protocol import Flags
+from rmote.protocol import Flags, TLSConfig
 from rmote.sync import Connection
 from tests.support.tool_cases.concurrent_tools import FirstCounter, SecondCounter
 from tests.sync.tools import Environment, Load, Methods, Second
@@ -64,7 +64,7 @@ def drive(connection: Connection, work, workers: int = WORKERS):
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_many_calls_from_many_threads_keep_results_with_their_callers():
+def test_many_calls_from_many_threads_keep_results_with_their_callers(transport_tls: TLSConfig | None):
     """Every answer must be the one its own arguments produce.
 
     The remote host computes, and the caller checks the value against an
@@ -83,7 +83,7 @@ def test_many_calls_from_many_threads_keep_results_with_their_callers():
                 results.append((PRIMES[worker] ** (100 + index), connection(Load.power, PRIMES[worker], 100 + index)))
         return results
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         batches = drive(connection, work)
         pairs = [pair for batch in batches for pair in batch]
         assert len(pairs) == WORKERS * CALLS
@@ -93,7 +93,7 @@ def test_many_calls_from_many_threads_keep_results_with_their_callers():
         assert_idle(connection)
 
 
-def test_concurrent_failures_carry_their_own_token():
+def test_concurrent_failures_carry_their_own_token(transport_tls: TLSConfig | None):
     def work(worker, start):
         start.wait(timeout=10)
         messages = []
@@ -108,7 +108,7 @@ def test_concurrent_failures_carry_their_own_token():
                 assert connection(Load.total, begin, SPAN) == expected_total(begin)
         return messages
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         batches = drive(connection, work)
         messages = [message for batch in batches for message in batch]
         assert len(messages) == WORKERS * 5
@@ -118,7 +118,7 @@ def test_concurrent_failures_carry_their_own_token():
         assert_idle(connection)
 
 
-def test_large_payloads_from_many_threads_interleave_without_damage(monkeypatch):
+def test_large_payloads_from_many_threads_interleave_without_damage(transport_tls: TLSConfig | None, monkeypatch):
     workers = 8
     frames: list[tuple[int, bool]] = []
 
@@ -142,7 +142,7 @@ def test_large_payloads_from_many_threads_interleave_without_damage(monkeypatch)
         assert answer == random.Random(worker).randbytes(BULK)
         return worker
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         # Transfer the tool first, so the measured frames carry only payloads.
         assert connection(Load.ping, "warm up") == "warm up"
         connection._runtime.run(instrument)
@@ -156,7 +156,7 @@ def test_large_payloads_from_many_threads_interleave_without_damage(monkeypatch)
         assert_idle(connection)
 
 
-def test_small_calls_make_progress_while_large_ones_transfer(monkeypatch):
+def test_small_calls_make_progress_while_large_ones_transfer(transport_tls: TLSConfig | None, monkeypatch):
     """A small RPC completes while a large request is held between fragments."""
     entered = threading.Event()
 
@@ -175,7 +175,7 @@ def test_small_calls_make_progress_while_large_ones_transfer(monkeypatch):
         monkeypatch.setattr(protocol, "send_frame", hold_after_fragment)
         return release
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         assert connection(Load.ping, "warm up") == "warm up"
         release = connection._runtime.run(instrument)
         loop = connection._runtime._loop
@@ -198,7 +198,7 @@ def test_small_calls_make_progress_while_large_ones_transfer(monkeypatch):
         assert_idle(connection)
 
 
-def test_first_call_of_every_class_transfers_it_once(monkeypatch):
+def test_first_call_of_every_class_transfers_it_once(transport_tls: TLSConfig | None, monkeypatch):
     calls = {
         Load.ping: "load",
         Second.ping: "second",
@@ -227,7 +227,7 @@ def test_first_call_of_every_class_transfers_it_once(monkeypatch):
         start.wait(timeout=10)
         return method, connection(method, calls[method])
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         connection._runtime.run(instrument)
         results = drive(connection, work, len(methods))
         for method, result in results:
@@ -243,7 +243,7 @@ def test_first_call_of_every_class_transfers_it_once(monkeypatch):
         assert_idle(connection)
 
 
-def test_expired_calls_leave_their_neighbours_untouched(deadline, monkeypatch):
+def test_expired_calls_leave_their_neighbours_untouched(transport_tls: TLSConfig | None, deadline, monkeypatch):
     timer = deadline("rmote.sync")
 
     async def instrument():
@@ -269,7 +269,7 @@ def test_expired_calls_leave_their_neighbours_untouched(deadline, monkeypatch):
         assert totals == [expected_total(begin) for begin in starts]
         return f"done:{worker}"
 
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         connection._runtime.run(instrument)
         results = drive(connection, work)
         assert sorted(results) == sorted(

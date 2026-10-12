@@ -10,23 +10,27 @@ import pytest
 from rmote.cli import build_parser
 
 
-def run_cli(*args: str, asyncio_debug: bool = False) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    # Normal progress output must not depend on slow-callback diagnostics
-    # inherited from CI. Exercise debug logging separately below.
-    env.pop("PYTHONASYNCIODEBUG", None)
-    if asyncio_debug:
-        env["PYTHONASYNCIODEBUG"] = "1"
-    return subprocess.run(
-        [sys.executable, "-m", "rmote", "rsync", *args],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env=env,
-    )
+@pytest.fixture
+def run_cli(tls_cli_args):
+    def invoke(*args: str, asyncio_debug: bool = False) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        # Normal progress output must not depend on slow-callback diagnostics
+        # inherited from CI. Exercise debug logging separately below.
+        env.pop("PYTHONASYNCIODEBUG", None)
+        if asyncio_debug:
+            env["PYTHONASYNCIODEBUG"] = "1"
+        return subprocess.run(
+            [sys.executable, "-m", "rmote", "rsync", *tls_cli_args, *args],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+
+    return invoke
 
 
-def test_directory_round_trip_logs_reuse_and_delete(tmp_path: Path) -> None:
+def test_directory_round_trip_logs_reuse_and_delete(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, remote, local = (root / name for name in ("source", "remote", "copy"))
     source.mkdir()
@@ -73,7 +77,7 @@ def test_directory_round_trip_logs_reuse_and_delete(tmp_path: Path) -> None:
     assert not (local / ".git").exists()
 
 
-def test_transport_quoting_interpreter_and_dash_r(tmp_path: Path) -> None:
+def test_transport_quoting_interpreter_and_dash_r(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     wrapper, record = root / "transport with spaces.py", root / "argv.json"
     wrapper.write_text(
@@ -113,7 +117,7 @@ def test_multiple_excludes_stop_at_next_option() -> None:
     assert args.delete is True
 
 
-def test_multiple_and_repeated_excludes_apply_together(tmp_path: Path) -> None:
+def test_multiple_and_repeated_excludes_apply_together(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.mkdir()
@@ -128,7 +132,7 @@ def test_multiple_and_repeated_excludes_apply_together(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("uploading", [False, True], ids=["download", "upload"])
-def test_delete_excluded_logs_previously_copied_files(tmp_path: Path, uploading: bool) -> None:
+def test_delete_excluded_logs_previously_copied_files(run_cli, tmp_path: Path, uploading: bool) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.mkdir()
@@ -153,7 +157,7 @@ def test_delete_excluded_logs_previously_copied_files(tmp_path: Path, uploading:
 
 @pytest.mark.parametrize("uploading", [False, True], ids=["download", "upload"])
 @pytest.mark.parametrize("destination_directory", [False, True], ids=["file", "directory"])
-def test_single_file_and_permissions(tmp_path: Path, uploading: bool, destination_directory: bool) -> None:
+def test_single_file_and_permissions(run_cli, tmp_path: Path, uploading: bool, destination_directory: bool) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     payload = os.urandom(13000)
@@ -174,7 +178,7 @@ def test_single_file_and_permissions(tmp_path: Path, uploading: bool, destinatio
     assert len(again.stderr.splitlines()) == 1
 
 
-def test_quiet_and_keep_permissions(tmp_path: Path) -> None:
+def test_quiet_and_keep_permissions(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.write_bytes(b"new")
@@ -188,7 +192,7 @@ def test_quiet_and_keep_permissions(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("debug", [False, True])
-def test_asyncio_diagnostics_follow_debug_flag(tmp_path: Path, debug: bool) -> None:
+def test_asyncio_diagnostics_follow_debug_flag(run_cli, tmp_path: Path, debug: bool) -> None:
     source, target = tmp_path / "source", tmp_path / "target"
     source.write_bytes(b"payload")
     options = ["--debug"] if debug else []
@@ -201,7 +205,7 @@ def test_asyncio_diagnostics_follow_debug_flag(tmp_path: Path, debug: bool) -> N
     assert target.read_bytes() == b"payload"
 
 
-def test_partial_reuse_still_logs_changed_file(tmp_path: Path) -> None:
+def test_partial_reuse_still_logs_changed_file(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.write_bytes(b"a" * 4096 + b"b" * 4096 + b"c" * 4096)
@@ -214,7 +218,7 @@ def test_partial_reuse_still_logs_changed_file(tmp_path: Path) -> None:
     assert target.read_bytes() == source.read_bytes()
 
 
-def test_new_empty_file_is_logged(tmp_path: Path) -> None:
+def test_new_empty_file_is_logged(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.touch()
@@ -237,14 +241,14 @@ def test_new_empty_file_is_logged(tmp_path: Path) -> None:
         ("--exec", "'unfinished", "source", "remote:target"),
     ],
 )
-def test_invalid_arguments_before_transport(args: tuple[str, ...]) -> None:
+def test_invalid_arguments_before_transport(run_cli, args: tuple[str, ...]) -> None:
     result = run_cli("--exec", "/does-not-exist", *args)
     assert result.returncode == 2, result.stderr
     assert "usage:" in result.stderr
     assert "Traceback" not in result.stderr
 
 
-def test_failed_transport_includes_reason(tmp_path: Path) -> None:
+def test_failed_transport_includes_reason(run_cli, tmp_path: Path) -> None:
     result = run_cli("--exec", "sh -c 'echo transport-failed >&2; exit 3'", str(tmp_path), "remote:/unused")
     assert result.returncode == 1
     assert "transport-failed" in result.stderr
@@ -252,7 +256,7 @@ def test_failed_transport_includes_reason(tmp_path: Path) -> None:
     assert "files checked" not in result.stderr
 
 
-def test_failure_preserves_destination_and_does_not_report_success(tmp_path: Path) -> None:
+def test_failure_preserves_destination_and_does_not_report_success(run_cli, tmp_path: Path) -> None:
     root = tmp_path.resolve()
     source, target = root / "source", root / "target"
     source.mkdir()

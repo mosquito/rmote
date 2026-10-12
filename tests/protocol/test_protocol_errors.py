@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Protocol, Tool
+from rmote.protocol import BaseProtocol, Protocol, TLSConfig, Tool
 
 
 class ValidTool(Tool):
@@ -263,7 +263,7 @@ class TestReadBoundary:
 class TestDeadProcess:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_immediately_exiting_process_raises(self) -> None:
+    async def test_immediately_exiting_process_raises(self, transport_tls: TLSConfig | None) -> None:
         """Protocol.from_subprocess on a process that exits immediately must raise, not hang."""
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -273,14 +273,14 @@ class TestDeadProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        proto = await Protocol.from_subprocess(process)
+        proto = await Protocol.from_subprocess(process, tls=transport_tls)
         with pytest.raises((ConnectionError, OSError)):
             async with proto:
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_empty_stdout_process_raises(self) -> None:
+    async def test_empty_stdout_process_raises(self, transport_tls: TLSConfig | None) -> None:
         """Process that closes stdout without writing PROTOCOL READY must raise, not hang."""
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -290,7 +290,7 @@ class TestDeadProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        proto = await Protocol.from_subprocess(process)
+        proto = await Protocol.from_subprocess(process, tls=transport_tls)
         with pytest.raises((ConnectionError, OSError)):
             async with proto:
                 pass

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.templates import Template
 from rmote.templates.filters import TEMPLATE_FILTERS
 from rmote.tools.template import RenderTemplate as RemoteTemplate
@@ -55,7 +55,7 @@ async def test_custom_filters_transferred_to_remote(protocol: Protocol):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(15)
-async def test_template_with_filters_in_isolated_remote(tmp_path):
+async def test_template_with_filters_in_isolated_remote(transport_tls: TLSConfig | None, tmp_path):
     class LocalFilter(HostFilter):
         prefix = "remote:"
 
@@ -70,7 +70,7 @@ async def test_template_with_filters_in_isolated_remote(tmp_path):
         cwd=tmp_path,
     )
     try:
-        async with await Protocol.from_subprocess(proc) as remote:
+        async with await Protocol.from_subprocess(proc, tls=transport_tls) as remote:
             assert await remote(FilterTemplateTool.package_info) == (
                 "rmote.templates",
                 "rmote.templates",

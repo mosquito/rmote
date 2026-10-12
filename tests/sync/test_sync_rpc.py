@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -6,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from rmote.protocol import TLSConfig
 from rmote.sync import Connection
 from tests.support.synchronization import wait_until
 from tests.sync.tools import Methods
@@ -24,15 +26,15 @@ def pending(connection: Connection) -> int:
 
 
 @pytest.mark.parametrize("method", [Methods.echo, Methods.async_echo, Methods.class_echo, Methods.async_class_echo])
-def test_sync_and_async_methods(method):
-    with Connection.from_local() as connection:
+def test_sync_and_async_methods(transport_tls: TLSConfig | None, method):
+    with Connection.from_local(tls=transport_tls) as connection:
         assert connection(method, "hello") == "hello"
         assert connection.call_with_timeout(5.0, method, "again") == "again"
         assert pending(connection) == 0
 
 
-def test_remote_keyword_arguments():
-    with Connection.from_local(rpc_timeout=5.0) as connection:
+def test_remote_keyword_arguments(transport_tls: TLSConfig | None):
+    with Connection.from_local(rpc_timeout=5.0, tls=transport_tls) as connection:
         assert connection(Methods.keywords, timeout=7.0, tool="remote") == (7.0, "remote")
         assert connection.call_with_timeout(3.0, Methods.keywords, timeout=8.0, tool="other") == (8.0, "other")
 
@@ -51,10 +53,10 @@ def written(connection: Connection) -> list[int]:
     return sizes
 
 
-def test_a_call_can_refuse_compression():
+def test_a_call_can_refuse_compression(transport_tls: TLSConfig | None):
     """The frame of an uncompressed call carries the bytes as they are."""
     payload = (b"rmote carries source and facts " * 2048).decode()
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         assert connection(Methods.echo, payload) == payload
         sizes = written(connection)
         assert connection(Methods.echo, payload) == payload
@@ -69,9 +71,9 @@ def test_a_call_can_refuse_compression():
     assert raw > len(payload)
 
 
-def test_an_uncompressed_streaming_method_is_refused_before_the_call(tmp_path):
+def test_an_uncompressed_streaming_method_is_refused_before_the_call(transport_tls: TLSConfig | None, tmp_path):
     marker = tmp_path / "started"
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         with pytest.raises(TypeError, match="asynchronous Protocol"):
             connection.uncompressed(Methods.stream, str(marker))
         assert not marker.exists()
@@ -80,9 +82,9 @@ def test_an_uncompressed_streaming_method_is_refused_before_the_call(tmp_path):
 
 
 @pytest.mark.parametrize("with_timeout", [False, True])
-def test_streaming_methods_rejected_before_remote_execution(tmp_path, with_timeout):
+def test_streaming_methods_rejected_before_remote_execution(transport_tls: TLSConfig | None, tmp_path, with_timeout):
     marker = tmp_path / "started"
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         with pytest.raises(TypeError, match="asynchronous Protocol"):
             if with_timeout:
                 connection.call_with_timeout(5.0, Methods.stream, str(marker))
@@ -93,8 +95,8 @@ def test_streaming_methods_rejected_before_remote_execution(tmp_path, with_timeo
         assert pending(connection) == 0
 
 
-def test_remote_and_invalid_tool_errors():
-    with Connection.from_local() as connection:
+def test_remote_and_invalid_tool_errors(transport_tls: TLSConfig | None):
+    with Connection.from_local(tls=transport_tls) as connection:
         with pytest.raises(FileNotFoundError, match="remote file"):
             connection(Methods.fail)
         with pytest.raises(ValueError, match="Tool"):
@@ -103,10 +105,10 @@ def test_remote_and_invalid_tool_errors():
         assert pending(connection) == 0
 
 
-def test_timeout_keeps_channel_and_remote_operation(tmp_path, deadline):
+def test_timeout_keeps_channel_and_remote_operation(transport_tls: TLSConfig | None, tmp_path, deadline):
     marker = tmp_path / "operation"
     timer = deadline("rmote.sync")
-    with Connection.from_local(rpc_timeout=timer.seconds) as connection:
+    with Connection.from_local(rpc_timeout=timer.seconds, tls=transport_tls) as connection:
         connection.call_with_timeout(5.0, Methods.echo, "warm up")
         with ThreadPoolExecutor(max_workers=1) as pool:
             call = pool.submit(connection, Methods.pause, str(marker))
@@ -124,10 +126,10 @@ def test_timeout_keeps_channel_and_remote_operation(tmp_path, deadline):
         assert pending(connection) == 0
 
 
-def test_first_tool_upload_uses_rpc_deadline(monkeypatch, deadline):
+def test_first_tool_upload_uses_rpc_deadline(transport_tls: TLSConfig | None, monkeypatch, deadline):
     timer = deadline("rmote.sync")
     entered = threading.Event()
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         assert connection._protocol is not None
         original = connection._protocol._call
 
@@ -148,10 +150,10 @@ def test_first_tool_upload_uses_rpc_deadline(monkeypatch, deadline):
         assert connection(Methods.echo, "retry upload") == "retry upload"
 
 
-def test_timeout_during_send_closes_channel(monkeypatch, deadline):
+def test_timeout_during_send_closes_channel(transport_tls: TLSConfig | None, monkeypatch, deadline):
     timer = deadline("rmote.sync")
     entered = threading.Event()
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         connection(Methods.echo, "warm up")
         assert connection._protocol is not None
 
@@ -171,9 +173,9 @@ def test_timeout_during_send_closes_channel(monkeypatch, deadline):
             connection(Methods.echo, "damaged channel")
 
 
-def test_keyboard_interrupt_waits_for_local_cleanup(tmp_path, monkeypatch):
+def test_keyboard_interrupt_waits_for_local_cleanup(transport_tls: TLSConfig | None, tmp_path, monkeypatch):
     marker = tmp_path / "interrupted"
-    with Connection.from_local() as connection:
+    with Connection.from_local(tls=transport_tls) as connection:
         connection(Methods.echo, "warm up")
         original = connection._runtime.result
         interrupted = False
@@ -193,9 +195,9 @@ def test_keyboard_interrupt_waits_for_local_cleanup(tmp_path, monkeypatch):
         assert connection(Methods.echo, "after interrupt") == "after interrupt"
 
 
-def test_close_finishes_waiting_call_and_rejects_new_calls(tmp_path):
+def test_close_finishes_waiting_call_and_rejects_new_calls(transport_tls: TLSConfig | None, tmp_path):
     marker = tmp_path / "waiting"
-    connection = Connection.from_local()
+    connection = Connection.from_local(tls=transport_tls)
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(connection, Methods.pause, str(marker))
@@ -209,16 +211,16 @@ def test_close_finishes_waiting_call_and_rejects_new_calls(tmp_path):
         connection.close()
 
 
-def test_eof_preserves_transport_error():
-    with Connection.from_local() as connection:
-        with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+def test_eof_preserves_transport_error(transport_tls: TLSConfig | None):
+    with Connection.from_local(tls=transport_tls) as connection:
+        with pytest.raises((ssl.SSLEOFError if transport_tls else asyncio.IncompleteReadError, ConnectionError)):
             connection(Methods.exit)
-        with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+        with pytest.raises((ssl.SSLEOFError if transport_tls else asyncio.IncompleteReadError, ConnectionError)):
             connection(Methods.echo, "after EOF")
 
 
-def test_loop_thread_call_rejected():
-    with Connection.from_local() as connection:
+def test_loop_thread_call_rejected(transport_tls: TLSConfig | None):
+    with Connection.from_local(tls=transport_tls) as connection:
 
         async def from_loop() -> None:
             with pytest.raises(RuntimeError, match="event loop thread"):
@@ -228,8 +230,8 @@ def test_loop_thread_call_rejected():
 
 
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
-def test_invalid_per_call_timeout(value):
-    with Connection.from_local() as connection:
+def test_invalid_per_call_timeout(transport_tls: TLSConfig | None, value):
+    with Connection.from_local(tls=transport_tls) as connection:
         with pytest.raises(ValueError, match="timeout"):
             connection.call_with_timeout(value, Methods.echo, "invalid")
         assert connection(Methods.echo, "still usable") == "still usable"

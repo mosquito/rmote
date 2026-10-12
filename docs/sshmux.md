@@ -238,6 +238,10 @@ It searches `$XDG_DATA_HOME/rmote/tls`, falling back to
 | `--tls-key` | `controller.key` |
 | `--tls-ca` | `controller-ca.crt` if present; otherwise `controller.crt` |
 
+Use `--no-tls` to disable TLS even when stored certificates exist. Do not combine
+it with explicit certificate, key, or CA arguments. The same options are
+available in `shell`, `repl`, and `rsync`; see {doc}`tls`.
+
 Without both default certificate and key files, `sshmux` starts without TLS.
 It does not create missing files. Explicit paths override the corresponding
 defaults; an explicitly selected file that does not exist causes startup to fail.

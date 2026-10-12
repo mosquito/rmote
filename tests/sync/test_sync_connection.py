@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from rmote.protocol import TLSConfig
 from rmote.sync import Connection
 from tests.support.tool_cases.ping import Ping
 from tests.sync.tools import Environment
@@ -24,9 +25,9 @@ def call(connection: Connection, method: Callable[..., Any], *args: Any) -> Any:
     return connection._runtime.run(invoke)
 
 
-def test_local_context_environment_and_close(tmp_path):
+def test_local_context_environment_and_close(transport_tls: TLSConfig | None, tmp_path):
     env = dict(os.environ, RMOTE_SYNC_TEST="local")
-    with Connection.from_local(cwd=str(tmp_path), env=env) as connection:
+    with Connection.from_local(cwd=str(tmp_path), env=env, tls=transport_tls) as connection:
         process = connection._process
         assert process is not None
         assert call(connection, Environment.inspect) == (str(tmp_path.resolve()), "local")
@@ -43,9 +44,9 @@ def test_direct_constructor_rejected():
         Connection()
 
 
-def test_command_transport_environment_and_close(tmp_path):
+def test_command_transport_environment_and_close(transport_tls: TLSConfig | None, tmp_path):
     with Connection.from_command(
-        "env", "RMOTE_SYNC_TEST=command", python=sys.executable, cwd=str(tmp_path)
+        "env", "RMOTE_SYNC_TEST=command", python=sys.executable, cwd=str(tmp_path), tls=transport_tls
     ) as connection:
         process = connection._process
         assert process is not None
@@ -55,19 +56,19 @@ def test_command_transport_environment_and_close(tmp_path):
 
 @pytest.mark.parametrize("field", ["connect_timeout", "rpc_timeout", "close_timeout"])
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
-def test_invalid_deadline_before_start(field, value, monkeypatch):
+def test_invalid_deadline_before_start(transport_tls: TLSConfig | None, field, value, monkeypatch):
     def fail(*args, **kwargs):
         pytest.fail("Invalid deadline must not create a runtime")
 
     monkeypatch.setattr("rmote.sync._Runtime", fail)
     with pytest.raises(ValueError, match=field):
-        Connection.from_local(**{field: value})
+        Connection.from_local(**{field: value}, tls=transport_tls)
 
 
-def test_startup_failure_leaves_no_thread():
+def test_startup_failure_leaves_no_thread(transport_tls: TLSConfig | None):
     threads = set(threading.enumerate())
     with pytest.raises(FileNotFoundError):
-        Connection.from_local(python="/does/not/exist/python")
+        Connection.from_local(python="/does/not/exist/python", tls=transport_tls)
     assert set(threading.enumerate()) == threads
 
 
@@ -97,12 +98,12 @@ def record_processes(
     return processes
 
 
-def test_eof_before_handshake_reaps_process(tmp_path, monkeypatch):
+def test_eof_before_handshake_reaps_process(transport_tls: TLSConfig | None, tmp_path, monkeypatch):
     executable = fake_interpreter(tmp_path, "raise SystemExit(0)\n")
     processes = record_processes(monkeypatch)
     threads = set(threading.enumerate())
     with pytest.raises((ConnectionError, BrokenPipeError)):
-        Connection.from_local(python=executable)
+        Connection.from_local(python=executable, tls=transport_tls)
     assert len(processes) == 1
     assert processes[0].returncode is not None
     assert set(threading.enumerate()) == threads
@@ -145,18 +146,20 @@ def test_handshake_timeout_closes_pipes_and_kills_stubborn_process(
     assert set(threading.enumerate()) == threads
 
 
-def test_stderr_pipe_during_successful_handshake(tmp_path):
+def test_stderr_pipe_during_successful_handshake(transport_tls: TLSConfig | None, tmp_path):
     executable = fake_interpreter(
         tmp_path,
         (f"import os, sys\nos.write(2, b'x' * 1048576)\nos.execv({sys.executable!r}, [{sys.executable!r}, '-qui'])\n"),
     )
-    with Connection.from_local(python=executable, stderr=subprocess.PIPE, connect_timeout=5.0) as connection:
+    with Connection.from_local(
+        python=executable, stderr=subprocess.PIPE, connect_timeout=5.0, tls=transport_tls
+    ) as connection:
         assert call(connection, Environment.inspect)[0] == os.getcwd()
     assert connection._process is not None
     assert connection._process.returncode is not None
 
 
-def test_ssh_arguments_and_real_protocol(monkeypatch):
+def test_ssh_arguments_and_real_protocol(transport_tls: TLSConfig | None, monkeypatch):
     original = asyncio.create_subprocess_exec
     commands = []
 
@@ -173,6 +176,7 @@ def test_ssh_arguments_and_real_protocol(monkeypatch):
         identity="key with spaces",
         python="remote-python",
         ssh_options=options,
+        tls=transport_tls,
     ) as connection:
         assert call(connection, Environment.inspect)[0] == os.getcwd()
     assert commands == [
@@ -195,8 +199,8 @@ def test_ssh_arguments_and_real_protocol(monkeypatch):
     assert options == ["-o", "BatchMode=yes"]
 
 
-def test_concurrent_and_loop_thread_close():
-    connection = Connection.from_local()
+def test_concurrent_and_loop_thread_close(transport_tls: TLSConfig | None):
+    connection = Connection.from_local(tls=transport_tls)
 
     async def from_loop():
         with pytest.raises(RuntimeError, match="event loop thread"):
@@ -211,8 +215,8 @@ def test_concurrent_and_loop_thread_close():
     assert connection._process.returncode is not None
 
 
-def test_body_exception_survives_cleanup_error(monkeypatch):
-    connection = Connection.from_local()
+def test_body_exception_survives_cleanup_error(transport_tls: TLSConfig | None, monkeypatch):
+    connection = Connection.from_local(tls=transport_tls)
     connection.close()
 
     def fail():
@@ -259,7 +263,7 @@ def test_timeout_during_process_creation_recovers_process(monkeypatch, deadline)
     assert set(threading.enumerate()) == threads
 
 
-def test_keyboard_interrupt_during_handshake_recovers_process(tmp_path, monkeypatch):
+def test_keyboard_interrupt_during_handshake_recovers_process(transport_tls: TLSConfig | None, tmp_path, monkeypatch):
     from rmote._runtime import _Runtime
 
     executable = fake_interpreter(tmp_path, "import threading\nthreading.Event().wait()\n")
@@ -289,14 +293,14 @@ def test_keyboard_interrupt_during_handshake_recovers_process(tmp_path, monkeypa
     monkeypatch.setattr(_Runtime, "run", interrupt_once)
     threads = set(threading.enumerate())
     with pytest.raises(KeyboardInterrupt):
-        Connection.from_local(python=executable, close_timeout=0.1)
+        Connection.from_local(python=executable, close_timeout=0.1, tls=transport_tls)
     assert processes[0].returncode is not None
     assert set(threading.enumerate()) == threads
 
 
-def test_a_call_that_reaches_the_loop_after_a_close_is_refused() -> None:
+def test_a_call_that_reaches_the_loop_after_a_close_is_refused(transport_tls: TLSConfig | None) -> None:
     """The state is read without a lock, so the loop thread checks it again."""
-    with Connection.from_local(python=sys.executable) as connection:
+    with Connection.from_local(python=sys.executable, tls=transport_tls) as connection:
         assert connection(Ping.ping) == 1
         connection._state = "CLOSING"
         try:
