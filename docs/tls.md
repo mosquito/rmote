@@ -15,6 +15,79 @@ the TLS client and verifies the controller's certificate chain and expected
 name before exchanging rmote data. The certificate must allow TLS server
 authentication and contain the expected name in its Subject Alternative Name.
 
+### Generate your own certificates
+
+Run these commands on the controller with OpenSSL 1.1.1 or later. They create
+a private CA valid for 10 years and a controller certificate valid for one year.
+Replace `controller.example.org` in both the commands and `TLSConfig` with the
+name you want to verify. For this stream transport, the name identifies the
+controller; it does not need to resolve in DNS.
+
+Check `openssl version` first. On macOS, the system command may be LibreSSL;
+use an OpenSSL installation for the commands below, including hostname verification.
+
+Create a new directory and restrict access to the generated keys:
+
+```sh
+umask 077
+mkdir rmote-tls
+cd rmote-tls
+```
+
+Create the CA certificate and its signing key:
+
+```sh
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes \
+  -keyout controller-ca.key -out controller-ca.crt -days 3650 \
+  -subj '/CN=rmote controller CA' \
+  -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -addext 'subjectKeyIdentifier=hash'
+```
+
+Create a separate controller key and certificate signing request:
+
+```sh
+openssl req -new -newkey rsa:3072 -sha256 -nodes \
+  -keyout controller.key -out controller.csr \
+  -subj '/CN=controller.example.org'
+```
+
+Set the server identity and permitted uses, then sign the request:
+
+```sh
+cat > controller.ext <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:controller.example.org
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+
+openssl x509 -req -in controller.csr \
+  -CA controller-ca.crt -CAkey controller-ca.key -CAcreateserial \
+  -out controller.crt -days 365 -sha256 -extfile controller.ext
+
+openssl verify -x509_strict -CAfile controller-ca.crt \
+  -purpose sslserver -verify_hostname controller.example.org controller.crt
+```
+
+The verification command must print `controller.crt: OK`. The connection uses
+`controller.crt`, `controller.key`, and `controller-ca.crt`; it does not need
+`controller-ca.key`. Keep the CA key separately for future certificate signing.
+Both private keys are unencrypted, so restrict their file access and never
+send them to the remote process or commit them to version control. Renew the
+controller certificate before it expires, using the same CA if you want to
+keep the existing trust configuration.
+
+See the OpenSSL documentation for
+[`req`](https://docs.openssl.org/3.0/man1/openssl-req/) and
+[`x509`](https://docs.openssl.org/3.0/man1/openssl-x509/) for command options.
+
+### Connect with the certificates
+
+Run the example from `rmote-tls`, or use absolute paths in `TLSConfig`.
 All three paths below refer to files on the controller:
 
 ```python
