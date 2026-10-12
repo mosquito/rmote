@@ -94,8 +94,9 @@ def test_shell_dispatch_preserves_bytes_transport_and_exit_status(
         (["sshmux"], b"--socket"),
         (["repl"], b"--async"),
         (["rsync"], b"--exec"),
+        (["certs"], b"--openssl-bin"),
     ],
-    ids=["root", "shell", "mux", "repl", "rsync"],
+    ids=["root", "shell", "mux", "repl", "rsync", "certs"],
 )
 def test_help(cli: list[str], command: list[str], option: bytes) -> None:
     result = subprocess.run([*cli, *command, "--help"], capture_output=True, timeout=10)

@@ -15,7 +15,44 @@ the TLS client and verifies the controller's certificate chain and expected
 name before exchanging rmote data. The certificate must allow TLS server
 authentication and contain the expected name in its Subject Alternative Name.
 
-### Generate your own certificates
+### Generate a certificate with the CLI
+
+Run this command on the controller:
+
+```sh
+rmote certs --hostname controller.example.org
+```
+
+It creates a self-signed `controller.crt` and an unencrypted `controller.key`,
+valid for 365 days. The command prints a `TLSConfig` example with absolute paths.
+Use the same certificate for `certfile` and `cafile`. The remote process trusts
+that certificate directly; replacing it also changes the trust configuration.
+
+The default directory is `$XDG_DATA_HOME/rmote/tls`, or
+`~/.local/share/rmote/tls` when `XDG_DATA_HOME` is unset, empty, or relative.
+This follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/latest/).
+The command creates the certificate directory with mode `0700` and the private
+key with mode `0600`. It refuses an existing output directory.
+
+Use `--output-dir` to select a new directory and `--days` to change the lifetime.
+The default verified name is `rmote.local`; `--hostname` accepts an ASCII DNS
+name or an IP address. The name does not need to resolve for this stream transport.
+
+```sh
+rmote certs --hostname controller.example.org --days 90 \
+  --output-dir ./controller-tls --openssl-bin /path/to/openssl
+```
+
+`--openssl-bin` defaults to the executable found by `shutil.which("openssl")`.
+If none is found, argparse requires an explicit `--openssl-bin` argument.
+The helper checks that the executable runs before it creates output directories.
+Other rmote commands do not require the OpenSSL executable.
+
+Keep the private key on the controller. Never commit it or send it to the remote
+process. The helper uses an OpenSSL configuration file and also supports LibreSSL.
+For a separate CA that can sign replacement certificates, use the commands below.
+
+### Generate certificates with a separate CA
 
 Run these commands on the controller with OpenSSL 1.1.1 or later. They create
 a private CA valid for 10 years and a controller certificate valid for one year.
