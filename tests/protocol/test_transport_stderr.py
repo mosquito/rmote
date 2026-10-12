@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Protocol, TLSConfig
+from rmote.protocol import BaseProtocol, Protocol, TLSConfig, TLSStream
 from tests.support.synchronization import async_wait_until
 from tests.support.tool_cases.ping import Ping
 
@@ -39,7 +39,26 @@ async def test_a_transport_that_speaks_on_stderr_explains_the_failure(transport_
 
 
 @pytest.mark.asyncio
-async def test_transport_exits_before_the_ready_write(transport_tls: TLSConfig | None):
+async def test_transport_exits_before_the_ready_write(transport_tls: TLSConfig | None, monkeypatch):
+    if transport_tls is not None:
+        # Force stdout/handshake failure to precede stderr collection. Process
+        # exit and pipe callbacks need not wake these consumers in that order.
+        failed = asyncio.Event()
+        collect = Protocol.collect_stderr
+        handshake = TLSStream.handshake
+
+        async def delayed_stderr(self: Protocol, reader: asyncio.StreamReader) -> None:
+            await failed.wait()
+            await collect(self, reader)
+
+        async def release_stderr(self: TLSStream, timeout: float) -> None:
+            try:
+                await handshake(self, timeout)
+            finally:
+                failed.set()
+
+        monkeypatch.setattr(Protocol, "collect_stderr", delayed_stderr)
+        monkeypatch.setattr(TLSStream, "handshake", release_stderr)
     remote = await Protocol.from_command(
         "sh", "-c", "echo bootstrap-failed; echo transport-failed >&2; exit 3", tls=transport_tls
     )

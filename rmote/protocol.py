@@ -1931,6 +1931,10 @@ class Protocol(BaseProtocol):
                                 data = await raw_reader.read(self.MAX_START_FAILURE_TEXT)
                         except (OSError, TimeoutError):
                             pass
+                    if self._stderr_task is not None:
+                        # Match read_boundary: stderr may arrive after stdout,
+                        # but an inherited open pipe must not block failure.
+                        await asyncio.wait({self._stderr_task}, timeout=0.1)
                     said = data.decode(errors="replace").splitlines()
                     raise ConnectionError(
                         f"{self.start_failure(said, self.transport_said)}; TLS handshake failed: {error}"
