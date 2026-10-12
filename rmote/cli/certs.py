@@ -5,6 +5,7 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="OpenSSL executable; required when openssl is absent from PATH.",
     )
-    parser.add_argument("--hostname", type=hostname, default="rmote.local", help="Controller DNS name or IP address.")
+    parser.add_argument(
+        "--hostname", type=hostname, default=socket.gethostname(), help="Controller DNS name or IP address."
+    )
     parser.add_argument("--days", type=positive_days, default=365, help="Certificate lifetime in days.")
     parser.add_argument(
         "--output-dir",

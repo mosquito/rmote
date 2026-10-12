@@ -20,7 +20,7 @@ authentication and contain the expected name in its Subject Alternative Name.
 Run this command on the controller:
 
 ```sh
-rmote certs --hostname controller.example.org
+rmote certs
 ```
 
 It creates a self-signed `controller.crt` and an unencrypted `controller.key`,
@@ -35,8 +35,9 @@ The command creates the certificate directory with mode `0700` and the private
 key with mode `0600`. It refuses an existing output directory.
 
 Use `--output-dir` to select a new directory and `--days` to change the lifetime.
-The default verified name is `rmote.local`; `--hostname` accepts an ASCII DNS
-name or an IP address. The name does not need to resolve for this stream transport.
+The default verified name is the controller's current hostname from
+`socket.gethostname()`. Use `--hostname` to select another ASCII DNS name or
+IP address. The name does not need to resolve for this stream transport.
 
 ```sh
 rmote certs --hostname controller.example.org --days 90 \
