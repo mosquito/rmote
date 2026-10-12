@@ -7,6 +7,35 @@ connections without it keep their existing behavior.
 Both processes need Python with the standard-library `ssl` module and TLS 1.3
 support in OpenSSL. No third-party Python package is needed on either side.
 
+## Why use TLS?
+
+A transport can connect two processes without encrypting their traffic.
+A plain TCP relay, such as `nc`, can carry rmote commands and results, but
+anyone who can observe that connection can read the transferred data.
+Serialization and compression do not protect secrets in arguments, file
+contents, environment variables, or command output.
+
+TLS adds encryption to the rmote stream independently of the transport.
+After a trusted bootstrap and successful TLS handshake, it protects tool code,
+RPC arguments, results, and protocol frames from reading or undetected changes
+in transit. This is useful when the available transport only carries bytes.
+SSH already protects its connection; rmote TLS is optional when using SSH.
+
+The current implementation starts TLS **after the plaintext bootstrap**.
+It can protect subsequent traffic from passive observation on an open channel,
+but it does not secure an unauthenticated bootstrap against an active attacker.
+An attacker who replaces the bootstrap can also replace its certificate checks.
+The bootstrap must reach the intended peer without modification; see
+{ref}`tls-trust-boundary` before using an unencrypted transport.
+
+An unencrypted Telnet connection has the same confidentiality problem.
+However, Telnet also carries control commands and negotiates terminal behavior,
+as described in [RFC 854](https://www.rfc-editor.org/rfc/rfc854.html).
+A Telnet transport would need an adapter that handles those commands and
+preserves binary data in both directions. rmote does not provide that adapter.
+TLS inside rmote would not protect Telnet login credentials or other data sent
+before the TLS handshake.
+
 ## Controller certificate
 
 The controller acts as the TLS server, even though it starts the transport.
@@ -164,6 +193,7 @@ The TLS handshake has its own timeout. The synchronous client's
 `connect_timeout` also bounds the complete connection setup. A failed TLS
 handshake closes the connection; there is no fallback to plaintext.
 
+(tls-trust-boundary)=
 ## Trust boundary
 
 The existing bootstrap sends executable Python, public CA certificates, and
