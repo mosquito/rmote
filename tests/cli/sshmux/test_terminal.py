@@ -17,7 +17,9 @@ class Terminal:
         set_winsize(self.master, rows, cols)
         self.original = termios.tcgetattr(self.slave)
         self.process = subprocess.Popen(
-            server.command("-tt", "host", "/bin/sh"),
+            # Keep the interactive shell as the PTY session leader. A local
+            # macOS Endpoint Security policy can reject the nested shell launch.
+            server.command("-tt", "host", "exec /bin/sh"),
             stdin=self.slave,
             stdout=self.slave,
             stderr=self.slave,

@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 
 from rmote.process import async_process
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from tests.support.transports import pacman_docker_protocol as pacman_docker_protocol
 
 
@@ -36,7 +36,9 @@ def facts_systemd_image(tool_docker: str, request: pytest.FixtureRequest) -> str
 
 
 @pytest_asyncio.fixture
-async def facts_docker_protocol(tool_docker: str, facts_systemd_image: str) -> AsyncIterator[Protocol]:
+async def facts_docker_protocol(
+    transport_tls: TLSConfig | None, tool_docker: str, facts_systemd_image: str
+) -> AsyncIterator[Protocol]:
     name = "rmote-facts-" + uuid.uuid4().hex[:12]
     created = False
     try:
@@ -107,7 +109,7 @@ async def facts_docker_protocol(tool_docker: str, facts_systemd_image: str) -> A
                 stderr=stderr,
             )
             try:
-                async with await Protocol.from_subprocess(child) as protocol:
+                async with await Protocol.from_subprocess(child, tls=transport_tls) as protocol:
                     yield protocol
             finally:
                 if child.returncode is None:

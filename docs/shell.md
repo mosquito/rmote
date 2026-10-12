@@ -137,7 +137,7 @@ command that does not exist is reported through the session and gives status
 The tool works without the command line client. Open a session, read its output
 through a streaming call, and close it to get the exit status.
 
-<!-- name: test_shell_doc; case: pipe_session; mark: timeout(30) -->
+<!-- name: test_shell_doc; case: pipe_session; fixtures: client_resources; mark: timeout(30) -->
 ```python
 import asyncio
 import sys

@@ -1,17 +1,20 @@
 import asyncio
+import ssl
 from typing import Any
 
 import pytest
 
-from rmote.protocol import Flags
+from rmote.protocol import Flags, TLSConfig
 from rmote.sync import Connection
 from tests.sync.tools import Methods
 
 
 @pytest.mark.parametrize("explicit_timeout", [False, True])
 @pytest.mark.parametrize("preloaded", [False, True])
-def test_new_rpc_after_idle_eof_rejects_before_dispatch(monkeypatch, explicit_timeout, preloaded):
-    connection = Connection.from_local(rpc_timeout=5.0)
+def test_new_rpc_after_idle_eof_rejects_before_dispatch(
+    transport_tls: TLSConfig | None, monkeypatch, explicit_timeout, preloaded
+):
+    connection = Connection.from_local(rpc_timeout=5.0, tls=transport_tls)
     try:
         if preloaded:
             assert connection(Methods.echo, "warm up") == "warm up"
@@ -25,7 +28,7 @@ def test_new_rpc_after_idle_eof_rejects_before_dispatch(monkeypatch, explicit_ti
             return protocol._close_error
 
         error = connection._runtime.run(disconnect, timeout=5.0)
-        assert isinstance(error, asyncio.IncompleteReadError)
+        assert isinstance(error, ssl.SSLEOFError if transport_tls else asyncio.IncompleteReadError)
 
         async def unexpected_dispatch(*args: Any, **kwargs: Any) -> Any:
             pytest.fail("A new RPC reached Tool dispatch after idle EOF")
@@ -45,8 +48,8 @@ def test_new_rpc_after_idle_eof_rejects_before_dispatch(monkeypatch, explicit_ti
         connection(Methods.echo, "after close")
 
 
-def test_rpc_waiting_during_eof_preserves_transport_error(monkeypatch, tmp_path):
-    with Connection.from_local(rpc_timeout=5.0) as connection:
+def test_rpc_waiting_during_eof_preserves_transport_error(transport_tls: TLSConfig | None, monkeypatch, tmp_path):
+    with Connection.from_local(rpc_timeout=5.0, tls=transport_tls) as connection:
         assert connection._protocol is not None and connection._process is not None
         protocol, process = connection._protocol, connection._process
         original_send = protocol.send
@@ -57,7 +60,7 @@ def test_rpc_waiting_during_eof_preserves_transport_error(monkeypatch, tmp_path)
                 process.terminate()
 
         monkeypatch.setattr(protocol, "send", disconnect_after_request)
-        with pytest.raises(asyncio.IncompleteReadError):
+        with pytest.raises(ssl.SSLEOFError if transport_tls else asyncio.IncompleteReadError):
             connection(Methods.pause, str(tmp_path / "started"))
     assert not connection._runtime._thread.is_alive()
     assert process.returncode is not None

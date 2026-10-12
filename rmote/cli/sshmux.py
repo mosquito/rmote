@@ -29,7 +29,8 @@ from typing import BinaryIO
 
 from rmote.cli.sftp import SftpServer
 from rmote.cli.shell import EscapeFilter, NonBlocking, regular_file, terminal_size, wait_readable, write_all
-from rmote.protocol import Protocol
+from rmote.cli.tls import configure_tls_parser, tls_config
+from rmote.protocol import Protocol, TLSConfig
 from rmote.tools.agent import Agent
 from rmote.tools.vty import Vty, launcher_source
 
@@ -556,9 +557,10 @@ async def serve(
     ready: BinaryIO | None = None,
     agent_socket: str | None = None,
     motd: bool = False,
+    tls: TLSConfig | None = None,
 ) -> None:
     """Connect once, then serve until stopped, disconnected or idle."""
-    protocol = await Protocol.from_command(*transport, python=python)
+    protocol = await Protocol.from_command(*transport, python=python, tls=tls)
     async with protocol:
         server = MuxServer(protocol, path, idle_timeout, agent_socket=agent_socket, motd=motd)
         loop = asyncio.get_running_loop()
@@ -786,6 +788,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "Port forwarding is not supported. X11 forwarding requests produce a warning; "
         "the shell still opens without X11 forwarding."
     )
+    configure_tls_parser(parser)
     parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument("-S", "--socket", required=True, help="Local UNIX control socket (reused with --daemon).")
     parser.add_argument(
@@ -837,10 +840,12 @@ def run(args: argparse.Namespace) -> int:
                 ready=ready,
                 agent_socket=args.agent_socket,
                 motd=args.motd,
+                tls=tls,
             )
         )
 
     try:
+        tls = tls_config(args)
         if args.daemon:
             ensure_running(path, start)
         else:

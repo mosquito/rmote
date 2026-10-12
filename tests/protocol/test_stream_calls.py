@@ -8,6 +8,7 @@ that is alone travels at once.
 import asyncio
 import contextlib
 import pickle
+import ssl
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from rmote.protocol import Flags, Protocol, StreamCredit
+from rmote.protocol import Flags, Protocol, StreamCredit, TLSConfig
 from tests.support.synchronization import ObservedEvent, wait_blocked
 from tests.support.tool_cases.streaming import Streamer, Waiting
 
@@ -219,10 +220,10 @@ class TestStreamingCalls:
 
 class TestStreamingAfterDisconnect:
     @pytest.mark.asyncio
-    async def test_lost_connection_reaches_the_consumer(self) -> None:
+    async def test_lost_connection_reaches_the_consumer(self, transport_tls: TLSConfig | None) -> None:
         import sys
 
-        proto = await Protocol.from_command(python=sys.executable)
+        proto = await Protocol.from_command(python=sys.executable, tls=transport_tls)
         async with proto:
             items = proto(Streamer.gated)
             assert await items.__anext__() == 0
@@ -230,7 +231,9 @@ class TestStreamingAfterDisconnect:
             assert proto._owned_process is not None
             proto._owned_process.kill()
 
-            with pytest.raises((ConnectionError, EOFError, asyncio.IncompleteReadError)):
+            with pytest.raises(
+                (ConnectionError, EOFError, ssl.SSLEOFError if transport_tls else asyncio.IncompleteReadError)
+            ):
                 async for _ in items:
                     pass
 
@@ -410,10 +413,10 @@ class TestFlowControlUnderLoad:
 
 class TestBatches:
     @pytest.mark.asyncio
-    async def test_a_producer_that_does_not_wait_fills_one_packet(self) -> None:
+    async def test_a_producer_that_does_not_wait_fills_one_packet(self, transport_tls: TLSConfig | None) -> None:
         """Items that are ready together cost one write and one read."""
         count = 500
-        async with await Counting.from_command(python=sys.executable) as remote:
+        async with await Counting.from_command(python=sys.executable, tls=transport_tls) as remote:
             received = [item async for item in remote.stream(Streamer.counted, count)]
 
         assert received == list(range(count))

@@ -10,7 +10,7 @@ from tests.support.ssh_agent import agent as agent
 
 
 @pytest.fixture
-def docs_ssh_agent(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def docs_ssh_agent(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, docs_tls: None) -> None:
     """Run forwarding examples with an isolated agent, never the user's agent."""
     isolated_agent = request.getfixturevalue("agent")
     monkeypatch.setenv("SSH_AUTH_SOCK", str(isolated_agent[0]))
@@ -27,7 +27,7 @@ def tool_examples(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture
 def quickstart_container(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, docs_tls: None
 ) -> Iterator[str]:
     """Run the quickstart against a disposable Debian host with real systemd."""
     import os

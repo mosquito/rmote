@@ -1,6 +1,7 @@
 """Real RPC targets for system-tool docstrings; each example gets a fresh container."""
 
 import asyncio
+import copy
 import shutil
 import subprocess
 import tempfile
@@ -8,11 +9,12 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
+from tests.support.tls import tls_for_mode
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -21,13 +23,33 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--no-docker", action="store_true", help="Skip tests that require Docker.")
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    expanded: list[pytest.Item] = []
     for item in items:
         if isinstance(item, pytest.DoctestItem) and any(
             'getfixture("debian_tool")' in example.source or 'getfixture("arch_tool")' in example.source
             for example in item.dtest.examples
         ):
-            item.add_marker(pytest.mark.docker)
+            # Doctests request fixtures dynamically, so pytest cannot expand
+            # their fixture parameters during normal function collection.
+            for enabled, mode in ((False, "plaintext"), (True, "tls")):
+                example = copy.copy(item.dtest)
+                example.globs = item.dtest.globs.copy()
+                variant = pytest.DoctestItem.from_parent(
+                    cast(Any, item.parent), name=f"{item.name}[{mode}]", runner=item.runner, dtest=example
+                )
+                variant.user_properties.append(("transport_tls", enabled))
+                variant.add_marker(pytest.mark.docker)
+                expanded.append(variant)
+        else:
+            expanded.append(item)
+    items[:] = expanded
+
+
+@pytest.fixture
+def doctest_tls(request: pytest.FixtureRequest) -> TLSConfig | None:
+    return tls_for_mode(dict(request.node.user_properties)["transport_tls"])
 
 
 @pytest.fixture(scope="session")
@@ -59,7 +81,7 @@ def arch_tool_image(tool_docker: str) -> str:
     return image
 
 
-def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Callable[..., Any]]:
+def container_remote(docker: str, image: str, *, systemd: bool, tls: TLSConfig | None) -> Iterator[Callable[..., Any]]:
     name = "rmote-doctest-" + uuid.uuid4().hex[:12]
     # Keep failed containers until the finally block so their logs are available.
     command = [docker, "run", "-d", "--name", name]
@@ -102,7 +124,7 @@ def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Call
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr,
                 )
-                protocol = await Protocol.from_subprocess(process)
+                protocol = await Protocol.from_subprocess(process, tls=tls)
                 await protocol.__aenter__()
                 return process, protocol
 
@@ -138,10 +160,12 @@ def container_remote(docker: str, image: str, *, systemd: bool) -> Iterator[Call
 
 
 @pytest.fixture
-def debian_tool(tool_docker: str, debian_tool_image: str) -> Iterator[Callable[..., Any]]:
-    yield from container_remote(tool_docker, debian_tool_image, systemd=True)
+def debian_tool(
+    tool_docker: str, debian_tool_image: str, doctest_tls: TLSConfig | None
+) -> Iterator[Callable[..., Any]]:
+    yield from container_remote(tool_docker, debian_tool_image, systemd=True, tls=doctest_tls)
 
 
 @pytest.fixture
-def arch_tool(tool_docker: str, arch_tool_image: str) -> Iterator[Callable[..., Any]]:
-    yield from container_remote(tool_docker, arch_tool_image, systemd=False)
+def arch_tool(tool_docker: str, arch_tool_image: str, doctest_tls: TLSConfig | None) -> Iterator[Callable[..., Any]]:
+    yield from container_remote(tool_docker, arch_tool_image, systemd=False, tls=doctest_tls)

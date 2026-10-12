@@ -12,10 +12,10 @@ import pytest
 
 
 class Session:
-    def __init__(self, asynchronous: bool) -> None:
+    def __init__(self, asynchronous: bool, tls_args: list[str]) -> None:
         self.asynchronous = asynchronous
         self.master, slave = pty.openpty()
-        args = [sys.executable, "-m", "rmote", "repl"]
+        args = [sys.executable, "-m", "rmote", "repl", *tls_args]
         if asynchronous:
             args.append("--async")
         self.process = subprocess.Popen(
@@ -76,8 +76,8 @@ class Session:
 
 
 @pytest.fixture(params=[False, True], ids=["sync", "async"])
-def session(request: pytest.FixtureRequest) -> Iterator[Session]:
-    console = Session(request.param)
+def session(request: pytest.FixtureRequest, tls_cli_args: list[str]) -> Iterator[Session]:
+    console = Session(request.param, tls_cli_args)
     try:
         # The banner also has a >>> example. Wait for its final line and then
         # the actual prompt before feeding commands.

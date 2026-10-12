@@ -257,7 +257,7 @@ def test_the_key_of_a_definition_is_the_one_the_peer_registers():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_a_tool_at_the_top_level_of_a_script_is_callable(tmp_path):
+async def test_a_tool_at_the_top_level_of_a_script_is_callable(transport_tls, tmp_path):
     """A class of __main__ has no module the peer can import, so it goes inline.
 
     The test runs a real script, because only a script has __main__ at its top
@@ -268,7 +268,7 @@ async def test_a_tool_at_the_top_level_of_a_script_is_callable(tmp_path):
         "import asyncio\n"
         "import sys\n"
         "\n"
-        "from rmote.protocol import Protocol, Tool\n"
+        "from rmote.protocol import Protocol, Tool, TLSConfig\n"
         "\n"
         "\n"
         "class ScriptTool(Tool):\n"
@@ -278,7 +278,7 @@ async def test_a_tool_at_the_top_level_of_a_script_is_callable(tmp_path):
         "\n"
         "\n"
         "async def main() -> None:\n"
-        "    async with await Protocol.from_command(python=sys.executable) as remote:\n"
+        f"    async with await Protocol.from_command(python=sys.executable, tls={transport_tls!r}) as remote:\n"
         "        print(await remote(ScriptTool.ping))\n"
         "\n"
         "\n"

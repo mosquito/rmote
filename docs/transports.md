@@ -103,9 +103,13 @@ Here `rmote-nc` supplies the shell's `$0`; the appended interpreter and flags
 become unused positional parameters. A bare `nc host 9000` does not implement
 the command-launching interface expected by `from_command`.
 
-Authentication and encryption come from the transport. SSH supplies both;
-a plain `nc` connection does not add them. The protocol executes transferred
-Python and unpickles responses, so both endpoints must be trusted.
+By default, authentication and encryption come from the transport. SSH supplies
+both; a plain `nc` connection does not add them. The Python connection factories
+also accept `tls=TLSConfig(...)` to encrypt the rmote stream after bootstrap.
+This can protect subsequent traffic from passive observation, but the bootstrap
+still requires protection against modification. See {doc}`tls` for the purpose,
+configuration, and trust requirements. The protocol executes transferred Python
+and unpickles responses, so both endpoints must be trusted.
 
 See {doc}`api/sync` and {doc}`api/protocol` for connection factories and resource
 ownership, and {doc}`concepts` for bootstrap and code transfer details.

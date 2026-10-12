@@ -13,7 +13,7 @@ from types import TracebackType
 from typing import Any, Never, ParamSpec, Self, TypeVar, overload
 
 from rmote._runtime import _Runtime
-from rmote.protocol import Protocol, streaming_method
+from rmote.protocol import Protocol, TLSConfig, streaming_method
 
 __all__ = ["Connection"]
 
@@ -78,6 +78,7 @@ class Connection:
         connect_timeout: float | None = 30.0,
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
+        tls: TLSConfig | None = None,
     ) -> Self:
         """Connect through a command that passes stdin and stdout unchanged.
 
@@ -90,6 +91,9 @@ class Connection:
         deadlines behave as in :meth:`from_local` and :meth:`from_ssh`.
         ``start_new_session`` isolates the transport from terminal signals,
         useful when the caller handles Ctrl-C itself.
+
+        ``tls`` establishes TLS before the protocol handshake. Its certificate
+        paths are local. Bootstrap still requires a trusted transport.
         """
         return cls._connect(
             [*argv, python, "-qui"],
@@ -99,6 +103,7 @@ class Connection:
             connect_timeout=connect_timeout,
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
+            tls=tls,
             start_new_session=start_new_session,
         )
 
@@ -113,6 +118,7 @@ class Connection:
         connect_timeout: float | None = 30.0,
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
+        tls: TLSConfig | None = None,
     ) -> Self:
         """Start a local Python interpreter and complete its protocol handshake.
 
@@ -128,6 +134,7 @@ class Connection:
             connect_timeout=connect_timeout,
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
+            tls=tls,
         )
 
     @classmethod
@@ -144,6 +151,7 @@ class Connection:
         connect_timeout: float | None = 30.0,
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
+        tls: TLSConfig | None = None,
     ) -> Self:
         """Start SSH and complete the remote Python protocol handshake."""
         cmd = ["ssh", "-T"]
@@ -163,6 +171,7 @@ class Connection:
             connect_timeout=connect_timeout,
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
+            tls=tls,
         )
 
     @classmethod
@@ -177,6 +186,7 @@ class Connection:
         rpc_timeout: float | None,
         close_timeout: float,
         start_new_session: bool = False,
+        tls: TLSConfig | None = None,
     ) -> Self:
         _check_timeout(connect_timeout, "connect_timeout")
         _check_timeout(rpc_timeout, "rpc_timeout")
@@ -186,7 +196,7 @@ class Connection:
         connection._close_timeout = close_timeout
         try:
             connection._runtime.run(
-                lambda: connection._open(cmd, cwd, env, stderr, connect_timeout, start_new_session)
+                lambda: connection._open(cmd, cwd, env, stderr, connect_timeout, start_new_session, tls)
             )
         except BaseException:
             try:
@@ -205,6 +215,7 @@ class Connection:
         stderr: int,
         timeout: float | None,
         start_new_session: bool = False,
+        tls: TLSConfig | None = None,
     ) -> None:
         self._loop_thread = threading.current_thread()
         async with asyncio.timeout(timeout):
@@ -224,7 +235,7 @@ class Connection:
             self._process = await asyncio.shield(self._spawn_task)
             # The protocol reads the transport stderr itself, and it keeps the
             # lines of the start for the failure of the handshake.
-            self._protocol = await Protocol.from_subprocess(self._process)
+            self._protocol = await Protocol.from_subprocess(self._process, tls=tls)
             await self._protocol.__aenter__()
 
     def _start_stderr_reader(self) -> None:

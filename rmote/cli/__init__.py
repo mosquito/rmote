@@ -3,7 +3,7 @@
 import argparse
 from collections.abc import Callable
 
-from rmote.cli import repl, rsync, shell, sshmux
+from rmote.cli import certs, repl, rsync, shell, sshmux
 
 
 class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
@@ -16,6 +16,7 @@ def build_parser(prog: str = "rmote") -> argparse.ArgumentParser:
         prog=prog, description="Run shells and tools over an rmote connection.", formatter_class=HelpFormatter
     )
     subparsers = parser.add_subparsers(required=True, title="commands")
+    certs.configure_parser(subparsers.add_parser("certs", help="Create a controller TLS certificate and key."))
     repl.configure_parser(subparsers.add_parser("repl", help="Open a Python REPL with a connected remote."))
     rsync.configure_parser(
         subparsers.add_parser("rsync", help="Synchronize files and directories with a remote host.")

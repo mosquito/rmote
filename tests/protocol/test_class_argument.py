@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Flags, Protocol, Tool
+from rmote.protocol import BaseProtocol, Flags, Protocol, TLSConfig, Tool
 
 
 @pytest.fixture
@@ -132,9 +132,9 @@ def test_other_copyreg_types_still_reduce():
 
 
 @pytest.mark.asyncio
-async def test_a_class_argument_works_without_a_prior_sync(packages):
+async def test_a_class_argument_works_without_a_prior_sync(transport_tls: TLSConfig | None, packages):
     counter, runner = packages
     # A fresh connection has nothing, and the first call carries both the tool
     # and the class of the argument.
-    async with await Protocol.from_command(python=sys.executable) as remote:
+    async with await Protocol.from_command(python=sys.executable, tls=transport_tls) as remote:
         assert await remote(runner.run, counter.Counter, 7) == 21

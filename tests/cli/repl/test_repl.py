@@ -15,20 +15,24 @@ from rmote.cli.repl import wake_on_signals
 from tests.cli.repl.conftest import Session
 
 
-def run_script(
-    source: str, *, asynchronous: bool = False, args: tuple[str, ...] = ()
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "rmote", "repl", *(["--async"] if asynchronous else []), *args],
-        input=source,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+@pytest.fixture
+def run_script(tls_cli_args):
+    def invoke(
+        source: str, *, asynchronous: bool = False, args: tuple[str, ...] = ()
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "rmote", "repl", *tls_cli_args, *(["--async"] if asynchronous else []), *args],
+            input=source,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    return invoke
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_ready_namespace_facts_and_interactive_tool(asynchronous: bool) -> None:
+def test_ready_namespace_facts_and_interactive_tool(run_script, asynchronous: bool) -> None:
     prefix = "await " if asynchronous else ""
     result = run_script(
         "import os, json\n"
@@ -57,19 +61,19 @@ def test_ready_namespace_facts_and_interactive_tool(asynchronous: bool) -> None:
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("source", ["1 / 0", "if =", "raise SystemExit(7)"])
-def test_script_failure_status(asynchronous: bool, source: str) -> None:
+def test_script_failure_status(run_script, asynchronous: bool, source: str) -> None:
     result = run_script(source, asynchronous=asynchronous)
     assert result.returncode == (7 if "SystemExit" in source else 1)
 
 
-def test_sync_rejects_top_level_await() -> None:
+def test_sync_rejects_top_level_await(run_script) -> None:
     result = run_script("await asyncio.sleep(0)")
     assert result.returncode == 1
     assert "SyntaxError" in result.stderr
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_explicit_transport_receives_python_flags_and_env(asynchronous: bool, tmp_path) -> None:
+def test_explicit_transport_receives_python_flags_and_env(run_script, asynchronous: bool, tmp_path) -> None:
     wrapper = tmp_path / "transport.py"
     wrapper.write_text(
         "import os, sys\n"
@@ -98,7 +102,7 @@ def test_explicit_transport_receives_python_flags_and_env(asynchronous: bool, tm
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_bootstrap_failure_is_readable(asynchronous: bool) -> None:
+def test_bootstrap_failure_is_readable(run_script, asynchronous: bool) -> None:
     result = run_script("", asynchronous=asynchronous, args=("--", "sh", "-c", "echo transport-failed >&2; exit 3"))
     assert result.returncode == 1
     assert "transport-failed" in result.stderr

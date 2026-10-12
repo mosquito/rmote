@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.tools.agent import Agent
 
 
@@ -104,7 +104,7 @@ async def test_release_wakes_accept_without_connections():
 
 
 @pytest.mark.asyncio
-async def test_transport_eof_removes_abandoned_listener():
+async def test_transport_eof_removes_abandoned_listener(transport_tls: TLSConfig | None):
     import sys
 
     process = await asyncio.create_subprocess_exec(
@@ -115,7 +115,7 @@ async def test_transport_eof_removes_abandoned_listener():
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        async with await Protocol.from_subprocess(process) as protocol:
+        async with await Protocol.from_subprocess(process, tls=transport_tls) as protocol:
             session_id = await protocol(Agent.start)
             path = await protocol(Agent.listen, session_id)
             assert Path(path).is_socket()

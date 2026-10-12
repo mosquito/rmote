@@ -9,19 +9,21 @@ from unittest.mock import Mock
 
 import pytest
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.tools import Agent, Exec
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direction", ["forward", "reverse", "remote-to-remote"])
-async def test_real_agent_listing_and_signing_in_each_direction(agent, monkeypatch, direction):
+async def test_real_agent_listing_and_signing_in_each_direction(
+    transport_tls: TLSConfig | None, agent, monkeypatch, direction
+):
     agent_path, public, _ = agent
     # In reverse mode, consulting the coordinator's environment must fail.
     monkeypatch.setenv("SSH_AUTH_SOCK", "/does-not-exist/coordinator-agent")
     agent_env = dict(os.environ, SSH_AUTH_SOCK=str(agent_path))
-    async with await Protocol.from_command(python=sys.executable, env=agent_env) as host_a:
-        async with await Protocol.from_command(python=sys.executable, env=agent_env) as host_b:
+    async with await Protocol.from_command(python=sys.executable, env=agent_env, tls=transport_tls) as host_a:
+        async with await Protocol.from_command(python=sys.executable, env=agent_env, tls=transport_tls) as host_b:
             listener = None if direction == "reverse" else host_a
             endpoint = None if direction == "forward" else host_b
             explicit_path = str(agent_path) if direction == "forward" else None

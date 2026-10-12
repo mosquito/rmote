@@ -10,14 +10,16 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.tools.exec import Exec
 
 pytestmark = pytest.mark.timeout(60)
 
 
 @pytest_asyncio.fixture(params=["direct", "subprocess", "ssh", pytest.param("docker", marks=pytest.mark.docker)])
-async def execute(request: pytest.FixtureRequest) -> AsyncIterator[Callable[..., Any]]:
+async def execute(
+    transport_tls: TLSConfig | None, request: pytest.FixtureRequest
+) -> AsyncIterator[Callable[..., Any]]:
     if request.param == "direct":
 
         async def direct(method, *args, **kwargs):
@@ -66,7 +68,7 @@ async def execute(request: pytest.FixtureRequest) -> AsyncIterator[Callable[...,
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        remote = await Protocol.from_subprocess(child)
+        remote = await Protocol.from_subprocess(child, tls=transport_tls)
         async with remote:
             yield remote
     finally:

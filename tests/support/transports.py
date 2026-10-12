@@ -10,11 +10,13 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig, TLSStream
 
 
 @asynccontextmanager
-async def subprocess_protocol(*command: str, cwd: Path | None = None) -> AsyncGenerator[Protocol, None]:
+async def subprocess_protocol(
+    *command: str, cwd: Path | None = None, tls: TLSConfig | None = None
+) -> AsyncGenerator[Protocol, None]:
     """Always reap the peer, including failed setup and exceptions in tests."""
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -24,8 +26,9 @@ async def subprocess_protocol(*command: str, cwd: Path | None = None) -> AsyncGe
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        proto = await Protocol.from_subprocess(process)
+        proto = await Protocol.from_subprocess(process, tls=tls)
         async with proto:
+            assert isinstance(proto.writer, TLSStream) is (tls is not None)
             yield proto
     finally:
         if process.returncode is None:
@@ -37,8 +40,8 @@ async def subprocess_protocol(*command: str, cwd: Path | None = None) -> AsyncGe
 
 
 @pytest_asyncio.fixture
-async def protocol():
-    async with subprocess_protocol(sys.executable, "-qui") as remote:
+async def protocol(transport_tls: TLSConfig | None):
+    async with subprocess_protocol(sys.executable, "-qui", tls=transport_tls) as remote:
         yield remote
 
 
@@ -58,13 +61,15 @@ def docker_image() -> str:
 
 
 @pytest_asyncio.fixture
-async def docker_protocol(docker_image: str, docker: str):
-    async with subprocess_protocol(docker, "run", "--rm", "-i", docker_image, "python3", "-qui") as remote:
+async def docker_protocol(docker_image: str, docker: str, transport_tls: TLSConfig | None):
+    async with subprocess_protocol(
+        docker, "run", "--rm", "-i", docker_image, "python3", "-qui", tls=transport_tls
+    ) as remote:
         yield remote
 
 
 @pytest_asyncio.fixture
-async def pacman_docker_protocol(docker: str) -> AsyncGenerator[Protocol, None]:
+async def pacman_docker_protocol(docker: str, transport_tls: TLSConfig | None) -> AsyncGenerator[Protocol, None]:
     build = await asyncio.create_subprocess_exec(
         docker,
         "build",
@@ -79,6 +84,15 @@ async def pacman_docker_protocol(docker: str) -> AsyncGenerator[Protocol, None]:
         raise RuntimeError("Failed to build Arch test image")
 
     async with subprocess_protocol(
-        docker, "run", "--platform", "linux/amd64", "--rm", "-i", "archlinux:python", "python3", "-qui"
+        docker,
+        "run",
+        "--platform",
+        "linux/amd64",
+        "--rm",
+        "-i",
+        "archlinux:python",
+        "python3",
+        "-qui",
+        tls=transport_tls,
     ) as remote:
         yield remote

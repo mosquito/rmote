@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from rmote.cli.tls import configure_tls_parser, tls_config
 from rmote.protocol import Protocol
 from rmote.tools.file_sync import FileSync
 from rmote.tools.rsync import Result, Rsync
@@ -32,7 +33,7 @@ async def transfer(args: argparse.Namespace) -> Result:
     source = args.source.removeprefix("remote:")
     target = args.target.removeprefix("remote:")
     python = args.python or ("python3" if args.transport else sys.executable)
-    async with await Protocol.from_command(*args.transport, python=python) as remote:
+    async with await Protocol.from_command(*args.transport, python=python, tls=tls_config(args)) as remote:
         entry = (
             await remote(Rsync.inspect, source) if not uploading else await asyncio.to_thread(Rsync.inspect, source)
         )
@@ -114,6 +115,7 @@ Extra destination entries are kept unless --delete is supplied.
 --delete-excluded also deletes excluded destination entries and implies --delete.
 Logs and transfer totals go to stderr. Omit --exec for a local Python subprocess.
 """
+    configure_tls_parser(parser)
     parser.set_defaults(__func__=run, __prog__=parser.prog, __parser__=parser)
     parser.add_argument(
         "-r",

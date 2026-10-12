@@ -20,8 +20,9 @@ from typing import Any, Never
 import rmote
 from rmote import tools
 from rmote._runtime import _Runtime
+from rmote.cli.tls import configure_tls_parser, tls_config
 from rmote.process import process
-from rmote.protocol import Protocol, Tool, inline
+from rmote.protocol import Protocol, TLSConfig, Tool, inline
 from rmote.sync import Connection
 from rmote.tools import facts
 from rmote.tools.facts.schema import FactsData
@@ -180,7 +181,9 @@ def wake_on_signals() -> Iterator[None]:
                 thread.join()
 
 
-def run_console(transport: list[str], *, python: str, asynchronous: bool, command: str | None) -> int:
+def run_console(
+    transport: list[str], *, python: str, asynchronous: bool, command: str | None, tls: TLSConfig | None = None
+) -> int:
     """Own the connection, console namespace and source cache for one session."""
     with ExitStack() as stack:
         previous_signal = signal.signal(signal.SIGTERM, terminate)
@@ -195,14 +198,16 @@ def run_console(transport: list[str], *, python: str, asynchronous: bool, comman
 
             async def connect() -> tuple[Protocol, FactsData]:
                 async with asyncio.timeout(30):
-                    protocol = await Protocol.from_command(*transport, python=python, start_new_session=True)
+                    protocol = await Protocol.from_command(*transport, python=python, start_new_session=True, tls=tls)
                     await connections.enter_async_context(protocol)
                     host = await protocol(facts.gather, sections=["system", "python"], raw=False)
                     return protocol, host
 
             remote, host = runtime.run(connect)
         else:
-            remote = stack.enter_context(Connection.from_command(*transport, python=python, start_new_session=True))
+            remote = stack.enter_context(
+                Connection.from_command(*transport, python=python, start_new_session=True, tls=tls)
+            )
             host = remote(facts.gather, sections=["system", "python"], raw=False)
 
         main = ModuleType("__main__")
@@ -254,6 +259,7 @@ Inside the REPL:
   remote(facts.gather, sections=["cpu", "memory"])  # sync (default)
   await remote(facts.gather, sections=["cpu"])      # with --async
 """
+    configure_tls_parser(parser)
     parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument(
         "-a", "--async", dest="asynchronous", action="store_true", help="Use Protocol and top-level await."
@@ -277,9 +283,11 @@ def run(args: argparse.Namespace) -> int:
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
     try:
-        return run_console(transport, python=python, asynchronous=args.asynchronous, command=args.command)
+        return run_console(
+            transport, python=python, asynchronous=args.asynchronous, command=args.command, tls=tls_config(args)
+        )
     except KeyboardInterrupt:
         return 130
-    except (OSError, ConnectionError, TimeoutError) as error:
+    except (OSError, ConnectionError, TimeoutError, ValueError) as error:
         print(f"{args.__prog__}: {error}", file=sys.stderr)
         return 1

@@ -219,6 +219,58 @@ already exist, and the socket path must be unused. The server never replaces
 an existing file or socket in foreground mode; `--daemon` reuses a running
 server as described above.
 
+## TLS for the rmote transport
+
+`sshmux` automatically uses the certificates created by `rmote certs`:
+
+```bash
+rmote certs
+rmote sshmux --socket=/tmp/container.sock -- docker exec -i my-container
+```
+
+It searches `$XDG_DATA_HOME/rmote/tls`, falling back to
+`~/.local/share/rmote/tls`. Existing files appear as defaults in
+`rmote sshmux --help`:
+
+| Option | Default file |
+|---|---|
+| `--tls-cert` | `controller.crt` |
+| `--tls-key` | `controller.key` |
+| `--tls-ca` | `controller-ca.crt` if present; otherwise `controller.crt` |
+
+Use `--no-tls` to disable TLS even when stored certificates exist. Do not combine
+it with explicit certificate, key, or CA arguments. The same options are
+available in `shell`, `repl`, and `rsync`; see {doc}`tls`.
+
+Without both default certificate and key files, `sshmux` starts without TLS.
+It does not create missing files. Explicit paths override the corresponding
+defaults; an explicitly selected file that does not exist causes startup to fail.
+Explicit TLS options require a complete certificate and key pair. Invalid
+credentials or a failed TLS handshake also stop startup, with no plaintext retry.
+
+All paths refer to local controller files. Set them explicitly when using a
+different store or a separate CA:
+
+```bash
+rmote sshmux --socket=/tmp/container.sock \
+  --tls-ca ./controller-ca.crt \
+  --tls-cert ./controller.crt --tls-key ./controller.key \
+  --tls-hostname controller.example.org -- docker exec -i my-container
+```
+
+`--tls-hostname` defaults to `socket.gethostname()`, matching `rmote certs`.
+It is the controller name checked by the remote process, not the destination
+label given to `ssh -S`. Without a separate CA file, the selected certificate
+also supplies the trust certificate.
+
+These options apply to foreground and daemon startup. Reusing an existing
+daemon keeps its current connection; restart it to change TLS credentials.
+Missing explicitly selected files remain errors even when reusing a daemon.
+
+TLS protects the rmote connection to the target. OpenSSH clients still use the
+local UNIX control socket. The plaintext bootstrap requires a trusted channel;
+see {doc}`tls` for the protection and its limits.
+
 ## Terminal behavior
 
 OpenSSH chooses whether to request a terminal: use `-t` for an interactive

@@ -112,10 +112,20 @@ async def test_shutdown_during_open_collects_and_closes_the_new_session():
         second.close()
 
 
-def test_existing_socket_is_not_replaced(server: Server):
+def test_existing_socket_is_not_replaced(server: Server, tls_cli_args):
     before = server.path.stat()
     result = subprocess.run(
-        [sys.executable, "-m", "rmote", "sshmux", "--socket", str(server.path), "--python", sys.executable],
+        [
+            sys.executable,
+            "-m",
+            "rmote",
+            "sshmux",
+            *tls_cli_args,
+            "--socket",
+            str(server.path),
+            "--python",
+            sys.executable,
+        ],
         capture_output=True,
         timeout=10,
     )

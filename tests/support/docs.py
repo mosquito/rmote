@@ -4,17 +4,76 @@ import asyncio
 import sys
 import threading
 from collections.abc import Iterator
+from functools import partial
 from typing import Any
 
 import pytest
 
-from rmote.protocol import Protocol
+from rmote.protocol import Protocol, TLSConfig
 from rmote.sync import Connection
 from tests.support.ssh import local_sshd as local_sshd
+from tests.support.tls import tls_for_mode
+
+
+def subprocess_example(source: str, path: str, enabled: bool, caller: Any) -> None:
+    # The inline-tool example needs __main__ and a real source file. Inject TLS
+    # before its source runs without changing the published example.
+    prefix = (
+        "from rmote.protocol import Protocol, TLSConfig\n"
+        "_factory = Protocol.from_subprocess\n"
+        "async def _with_tls(cls, process, *, tls=None):\n"
+        f"    return await _factory(process, tls=tls if tls is not None else {tls_for_mode(enabled)!r})\n"
+        "Protocol.from_subprocess = classmethod(_with_tls)\n"
+    )
+    caller(prefix + source, path)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    # Markdown collectors create Functions without pytest's parameter expansion.
+    expanded: list[pytest.Item] = []
+    for item in items:
+        if not isinstance(item, pytest.Function) or item.path.suffix != ".md":
+            expanded.append(item)
+            continue
+        call = item.obj
+        subprocess_call = isinstance(call, partial) and any(
+            name in call.args[0] for name in ("Connection.from_", "Protocol.from_")
+        )
+        if "docs_tls" not in item.fixturenames and not subprocess_call:
+            expanded.append(item)
+            continue
+        assert item.parent is not None
+        for enabled, mode in ((False, "plaintext"), (True, "tls")):
+            variant_call = (
+                partial(subprocess_example, call.args[0], call.args[1], enabled, call.func)
+                if subprocess_call
+                else call
+            )
+            variant = pytest.Function.from_parent(item.parent, name=f"{item.name}[{mode}]", callobj=variant_call)
+            variant.own_markers.extend(item.own_markers)
+            variant.keywords.update(item.keywords)
+            variant.user_properties.append(("transport_tls", enabled))
+            expanded.append(variant)
+    items[:] = expanded
 
 
 @pytest.fixture
-def client_resources(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[asyncio.subprocess.Process]]:
+def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Run unchanged documentation examples through each real transport mode."""
+    transport_tls = tls_for_mode(dict(request.node.user_properties)["transport_tls"])
+    factory = Protocol.from_subprocess
+
+    async def from_subprocess(
+        cls: type[Protocol], process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None
+    ) -> Protocol:
+        return await factory(process, tls=tls if tls is not None else transport_tls)
+
+    monkeypatch.setattr(Protocol, "from_subprocess", classmethod(from_subprocess))
+
+
+@pytest.fixture
+def client_resources(monkeypatch: pytest.MonkeyPatch, docs_tls: None) -> Iterator[list[asyncio.subprocess.Process]]:
     """Check process and thread cleanup after an executable client example."""
     threads = set(threading.enumerate())
     processes: list[asyncio.subprocess.Process] = []

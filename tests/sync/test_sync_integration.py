@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from rmote.protocol import TLSConfig
 from rmote.sync import Connection
 from tests.sync.integration_tools import TransportChecks
 
@@ -16,7 +17,9 @@ pytestmark = pytest.mark.timeout(20)
 
 
 @pytest.fixture(params=["local", "ssh"])
-def isolated_connection(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Connection]:
+def isolated_connection(
+    transport_tls: TLSConfig | None, request: pytest.FixtureRequest, tmp_path: Path
+) -> Iterator[Connection]:
     executable = tmp_path / "isolated-python"
     executable.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S "$@"\n')
     executable.chmod(0o755)
@@ -42,9 +45,12 @@ def isolated_connection(request: pytest.FixtureRequest, tmp_path: Path) -> Itera
             stderr=subprocess.PIPE,
             connect_timeout=5.0,
             rpc_timeout=5.0,
+            tls=transport_tls,
         )
     else:
-        connection = Connection.from_local(python=str(executable), connect_timeout=5.0, rpc_timeout=5.0)
+        connection = Connection.from_local(
+            python=str(executable), connect_timeout=5.0, rpc_timeout=5.0, tls=transport_tls
+        )
     try:
         with connection:
             yield connection

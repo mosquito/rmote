@@ -20,7 +20,8 @@ import sys
 from collections.abc import Callable
 from types import FrameType
 
-from rmote.protocol import Protocol
+from rmote.cli.tls import configure_tls_parser, tls_config
+from rmote.protocol import Protocol, TLSConfig
 from rmote.tools.vty import Vty, launcher_source
 
 # Shape of the value that termios.tcgetattr returns and tcsetattr accepts.
@@ -372,6 +373,7 @@ async def run_shell(
     escape: str = DEFAULT_ESCAPE,
     show_transport_stderr: bool = False,
     want_pty: bool = True,
+    tls: TLSConfig | None = None,
 ) -> int:
     """Open a remote session over *transport* and bridge the local descriptors.
 
@@ -416,7 +418,7 @@ async def run_shell(
     release = guard_terminal(mode.restore, *(item.restore for item in flags))
 
     try:
-        protocol = await Protocol.from_command(*transport, python=python, stderr=stderr)
+        protocol = await Protocol.from_command(*transport, python=python, stderr=stderr, tls=tls)
         async with protocol:
             key = await protocol(
                 Vty.open,
@@ -461,6 +463,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         f"{parser.prog} docker exec -i container | "
         f"{parser.prog} --command /bin/bash --command=-l ssh server"
     )
+    configure_tls_parser(parser)
     parser.set_defaults(__func__=run, __prog__=parser.prog)
     parser.add_argument(
         "-p",
@@ -535,6 +538,7 @@ def run(args: argparse.Namespace) -> int:
                 escape=args.escape,
                 show_transport_stderr=args.transport_stderr,
                 want_pty=not args.no_pty,
+                tls=tls_config(args),
             )
         )
     except KeyboardInterrupt:
@@ -544,6 +548,6 @@ def run(args: argparse.Namespace) -> int:
         print(f"{prog}: {error}", file=sys.stderr)
         print(f"{prog}: run it again with --no-pty to use pipes.", file=sys.stderr)
         return 1
-    except (OSError, ConnectionError) as error:
+    except (OSError, ConnectionError, ValueError) as error:
         print(f"{prog}: {error}", file=sys.stderr)
         return 1

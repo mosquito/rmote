@@ -38,7 +38,7 @@ def server_options():
 
 
 @pytest.fixture
-def server(request: pytest.FixtureRequest, server_env, server_options):
+def server(request: pytest.FixtureRequest, server_env, server_options, tls_cli_args):
     ssh = shutil.which("ssh")
     if os.name != "posix" or ssh is None:
         pytest.skip("requires POSIX and an OpenSSH client")
@@ -47,7 +47,7 @@ def server(request: pytest.FixtureRequest, server_env, server_options):
         path = Path(directory) / "s"
         command = getattr(request, "param", [sys.executable, "-m", "rmote"])
         process = subprocess.Popen(
-            [*command, "sshmux", "--socket", str(path), "--python", sys.executable, *server_options],
+            [*command, "sshmux", "--socket", str(path), "--python", sys.executable, *tls_cli_args, *server_options],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

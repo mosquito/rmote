@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
-from rmote.protocol import Flags, Protocol, Tool
+from rmote.protocol import Flags, Protocol, TLSConfig, Tool
 from rmote.sync import Connection
 
 pytestmark = pytest.mark.timeout(10)
 
 
 @pytest_asyncio.fixture
-async def remote():
+async def remote(transport_tls: TLSConfig | None):
     child = await asyncio.create_subprocess_exec(
         sys.executable,
         "-qui",
@@ -22,7 +22,7 @@ async def remote():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    proto = await Protocol.from_subprocess(child)
+    proto = await Protocol.from_subprocess(child, tls=transport_tls)
     try:
         await asyncio.wait_for(proto.__aenter__(), 3)
         yield proto
@@ -140,7 +140,7 @@ async def test_transport_failure_does_not_send_fallback(monkeypatch):
     assert proto._closed.is_set()
 
 
-def test_sync_client_receives_serialization_error_and_can_continue():
+def test_sync_client_receives_serialization_error_and_can_continue(transport_tls: TLSConfig | None):
     class Unpicklable(Tool):
         @staticmethod
         def value():
@@ -150,7 +150,7 @@ def test_sync_client_receives_serialization_error_and_can_continue():
         def echo(value):
             return value
 
-    with Connection.from_local() as remote:
+    with Connection.from_local(tls=transport_tls) as remote:
         with pytest.raises(RuntimeError, match="Remote response serialization failed"):
             remote(Unpicklable.value)
         assert remote(Unpicklable.echo, "still usable") == "still usable"
