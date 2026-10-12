@@ -276,3 +276,27 @@ async def test_plaintext_connection_still_works():
     async with await Protocol.from_command(python=sys.executable) as protocol:
         assert not isinstance(protocol.writer, TLSStream)
         assert await protocol(Methods.echo, "plain") == "plain"
+
+
+@pytest.mark.asyncio
+async def test_remote_log_during_tls_startup_waits_for_ready(tls_config, monkeypatch, caplog):
+    from rmote import protocol as module
+
+    payload = module.bootstrap_payload()
+    startup = """
+_original_handshake = TLSStream.handshake
+async def _handshake_with_log(self, timeout):
+    await _original_handshake(self, timeout)
+    logging.warning("log before protocol ready")
+    # Let the log callback and its sender run before writing READY.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+TLSStream.handshake = _handshake_with_log
+"""
+    monkeypatch.setattr(
+        module, "bootstrap_payload", lambda: payload + f"exec({startup!r}, _protocol.__dict__)\n".encode()
+    )
+    async with asyncio.timeout(3):
+        async with await Protocol.from_command(python=sys.executable, tls=tls_config) as protocol:
+            assert await protocol(Methods.echo, "ready") == "ready"
+    assert "log before protocol ready" in caplog.text

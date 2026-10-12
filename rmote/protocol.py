@@ -1782,7 +1782,7 @@ class BaseProtocol:
             os.close(report_fd)
 
         protocol = cls(reader, writer)
-        log_handler = RemoteLogHandler(protocol, loop)  # type: ignore[arg-type]
+        log_handler = RemoteLogHandler(protocol, loop, paused=True)  # type: ignore[arg-type]
         protocol.log_handler = log_handler  # type: ignore[attr-defined]
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
@@ -1957,6 +1957,10 @@ class Protocol(BaseProtocol):
             await self.__aexit__(*sys.exc_info())
             raise
         self._loop_task = asyncio.create_task(self._loop())
+        if self.log_handler is not None:
+            self.log_handler.paused = False
+            if self.log_handler.pending:
+                self.log_handler.start()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -2667,10 +2671,13 @@ class RemoteLogHandler(logging.Handler):
     ATTACH_RECORDS: ClassVar[int] = 64
     ATTACH_BYTES: ClassVar[int] = 16 * 1024
 
-    def __init__(self, protocol: Protocol, loop: asyncio.AbstractEventLoop, level: int = logging.NOTSET) -> None:
+    def __init__(
+        self, protocol: Protocol, loop: asyncio.AbstractEventLoop, level: int = logging.NOTSET, *, paused: bool = False
+    ) -> None:
         super().__init__(level)
         self.protocol = protocol
         self.loop = loop
+        self.paused = paused
         # Each entry keeps the local record beside the dictionary that travels,
         # so a failure to send is reported against the record that caused it.
         self.pending: list[tuple[logging.LogRecord, LogRecord]] = []
@@ -2710,6 +2717,10 @@ class RemoteLogHandler(logging.Handler):
                 self.pending.clear()
             finally:
                 self.release()
+            return
+        if self.paused:
+            # Startup can log while TLS yields to the event loop. Keep those
+            # records until both READY boundaries precede every packet.
             return
         if self.protocol.responses_pending and self.timer is None:
             # A response is owed and carries the records for free. The timer
