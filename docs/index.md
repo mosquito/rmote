@@ -62,6 +62,7 @@ client unpickles returned data.
 
 quickstart
 transports
+tls
 writing-tools
 repl
 rsync

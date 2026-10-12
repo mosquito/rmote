@@ -10,8 +10,10 @@ import importlib.util
 import inspect
 import io
 import logging
+import math
 import os
 import pickle
+import ssl
 import struct
 import sys
 import textwrap
@@ -931,6 +933,208 @@ class FrameDecompressor:
         return payload
 
 
+@dataclass(frozen=True)
+class TLSConfig:
+    """Use the controller certificate to protect a bootstrapped connection.
+
+    All paths are local. Only the CA certificates and expected server name
+    travel to the peer. Bootstrap still requires a trusted transport. This
+    authenticates the controller; it does not authenticate the remote host.
+    """
+
+    certfile: str
+    keyfile: str
+    cafile: str
+    server_hostname: str
+    handshake_timeout: float = 10.0
+
+    def prepare(self) -> tuple[ssl.SSLContext, str]:
+        if not self.server_hostname:
+            raise ValueError("server_hostname must not be empty")
+        if not math.isfinite(self.handshake_timeout) or self.handshake_timeout <= 0:
+            raise ValueError("handshake_timeout must be a finite positive number")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(self.certfile, self.keyfile)
+        ca_data = Path(self.cafile).read_text(encoding="ascii")
+        # Reject invalid trust material before sending the bootstrap.
+        ssl.create_default_context(cadata=ca_data)
+        return context, ca_data
+
+
+class TLSStream(asyncio.Transport):
+    """Provide a decrypted reader and a TLS writer over arbitrary byte streams.
+
+    One task reads TLS records. The StreamReader pauses that task when its
+    plaintext buffer fills, so TLS preserves transport backpressure. All SSL
+    operations run on the event loop; no SSL call crosses an await boundary.
+    """
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        context: ssl.SSLContext,
+        *,
+        server_side: bool,
+        server_hostname: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._raw_reader = reader
+        self._raw_writer = writer
+        self._incoming = ssl.MemoryBIO()
+        self._outgoing = ssl.MemoryBIO()
+        self.ssl_object = context.wrap_bio(
+            self._incoming, self._outgoing, server_side=server_side, server_hostname=server_hostname
+        )
+        self.reader = asyncio.StreamReader()
+        self.reader.set_transport(self)
+        self._reading = asyncio.Event()
+        self._reading.set()
+        self._received = asyncio.Event()
+        self._writing = asyncio.Lock()
+        self._pending = bytearray()
+        self._closing = False
+        self._error: Exception | None = None
+        self._pump: asyncio.Task[None] | None = None
+
+    def _flush(self) -> None:
+        while self._outgoing.pending:
+            self._raw_writer.write(self._outgoing.read())
+
+    async def handshake(self, timeout: float) -> None:
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    try:
+                        self.ssl_object.do_handshake()
+                    except ssl.SSLWantReadError:
+                        self._flush()
+                        await self._raw_writer.drain()
+                        data = await self._raw_reader.read(65536)
+                        if data:
+                            self._incoming.write(data)
+                        else:
+                            self._incoming.write_eof()
+                    else:
+                        self._flush()
+                        await self._raw_writer.drain()
+                        break
+            self._pump = asyncio.create_task(self._receive(), name="rmote-tls-reader")
+        except BaseException:
+            self.close()
+            raise
+
+    async def _receive(self) -> None:
+        try:
+            while not self._closing:
+                await self._reading.wait()
+                try:
+                    data = self.ssl_object.read(16384)
+                except ssl.SSLWantReadError:
+                    self._flush()
+                    # Reading must continue even when both peers have full
+                    # write buffers. Only application writers wait in drain().
+                    encrypted = await self._raw_reader.read(65536)
+                    if encrypted:
+                        self._incoming.write(encrypted)
+                    else:
+                        self._incoming.write_eof()
+                    self._received.set()
+                    continue
+                if not data:
+                    self.reader.feed_eof()
+                    self._received.set()
+                    return
+                self.reader.feed_data(data)
+                self._flush()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._error = error
+            self.reader.set_exception(error)
+            self.close()
+
+    def write(self, data: Any) -> None:
+        if self._error is not None:
+            raise self._error
+        if self.is_closing():
+            raise ConnectionError("TLS connection closed")
+        self._pending.extend(data)
+
+    async def drain(self) -> None:
+        async with self._writing:
+            while self._pending:
+                if self._error is not None:
+                    raise self._error
+                if self.is_closing():
+                    raise ConnectionError("TLS connection closed")
+                self._received.clear()
+                try:
+                    size = self.ssl_object.write(bytes(self._pending[:16384]))
+                except ssl.SSLWantReadError:
+                    self._flush()
+                    await self._raw_writer.drain()
+                    if self.reader.at_eof():
+                        raise ConnectionError("TLS peer closed while writing") from None
+                    await self._received.wait()
+                else:
+                    del self._pending[:size]
+                    self._flush()
+                    await self._raw_writer.drain()
+            if self._error is not None:
+                raise self._error
+            await self._raw_writer.drain()
+
+    def pause_reading(self) -> None:
+        self._reading.clear()
+
+    def resume_reading(self) -> None:
+        self._reading.set()
+
+    def is_reading(self) -> bool:
+        return self._reading.is_set() and not self._closing
+
+    def is_closing(self) -> bool:
+        return self._closing or self._raw_writer.is_closing()
+
+    def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._pending.clear()
+        try:
+            self.ssl_object.unwrap()
+        except ssl.SSLError:
+            # Send close_notify without waiting for the peer's reply. The
+            # owner may be closing after cancellation or a protocol error.
+            pass
+        try:
+            self._flush()
+        except (OSError, RuntimeError):
+            # Closing a broken transport must preserve the original error.
+            pass
+        finally:
+            self._raw_writer.close()
+            self._received.set()
+            self.reader.feed_eof()
+            if self._pump is not None and self._pump is not asyncio.current_task():
+                self._pump.cancel()
+
+    async def wait_closed(self) -> None:
+        if self._pump is not None:
+            await asyncio.gather(self._pump, return_exceptions=True)
+        try:
+            async with asyncio.timeout(1):
+                await self._raw_writer.wait_closed()
+        except TimeoutError:
+            # A peer that stopped reading must not prevent local cleanup.
+            self._raw_writer.transport.abort()
+        except NotImplementedError:
+            # The remote write-pipe FlowControlMixin has no close waiter.
+            pass
+
+
 class BaseProtocol:
     # Five-byte magic, uint32 flags and payload length, uint64 packet id.
     MAGIC = b"RMOTE"
@@ -1006,7 +1210,7 @@ class BaseProtocol:
     # with a clear error instead of waiting for room that cannot appear.
     MAX_STREAM_ITEM = 64 * 1024 * 1024
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
         self.reader = reader
         self.writer = writer
         self.read_lock = asyncio.Lock()
@@ -1024,6 +1228,23 @@ class BaseProtocol:
         # evidence of a failure that happens before the peer runs our code.
         self.transport_said: deque[str] = deque(maxlen=self.MAX_START_FAILURE_LINES)
         self._stderr_task: asyncio.Task[None] | None = None
+        self._tls_context: ssl.SSLContext | None = None
+        self._tls_timeout = 10.0
+
+    async def start_tls(
+        self,
+        context: ssl.SSLContext,
+        *,
+        server_side: bool,
+        server_hostname: str | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        """Establish TLS before exchanging any rmote boundaries or frames."""
+        if isinstance(self.writer, TLSStream):
+            raise RuntimeError("TLS is already active")
+        stream = TLSStream(self.reader, self.writer, context, server_side=server_side, server_hostname=server_hostname)
+        self.reader, self.writer = stream.reader, stream
+        await stream.handshake(timeout)
 
     async def receive(self) -> Packet:
         """Read frames until one logical packet is complete, then return it.
@@ -1373,12 +1594,22 @@ class BaseProtocol:
                     said.append(spoken)
 
     @classmethod
-    async def from_subprocess(cls, process: asyncio.subprocess.Process) -> Self:
+    async def from_subprocess(cls, process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None) -> Self:
         assert process.stdin is not None, "Process stdin must not be None"
         assert process.stdout is not None, "Process stdout must not be None"
+        context, ca_data = tls.prepare() if tls is not None else (None, None)
         process.stdin.write(bootstrap_payload())
-        process.stdin.write(b"asyncio.run(_protocol.run())\n")
+        if tls is None:
+            process.stdin.write(b"asyncio.run(_protocol.run())\n")
+        else:
+            process.stdin.write(
+                f"asyncio.run(_protocol.run(tls_server_hostname={tls.server_hostname!r}, "
+                f"tls_ca_data={ca_data!r}, tls_handshake_timeout={tls.handshake_timeout!r}))\n".encode()
+            )
         instance = cls(reader=process.stdout, writer=process.stdin)
+        instance._tls_context = context
+        if tls is not None:
+            instance._tls_timeout = tls.handshake_timeout
         if process.stderr is not None:
             # The transport keeps its own stderr only when the caller asked
             # for a pipe. Then this side reads it, for the failure of the
@@ -1394,6 +1625,7 @@ class BaseProtocol:
         stderr: int = asyncio.subprocess.PIPE,
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
+        tls: TLSConfig | None = None,
     ) -> Self:
         """Bootstrap a Protocol over any command that starts a remote Python REPL.
 
@@ -1411,6 +1643,7 @@ class BaseProtocol:
                 it, or a descriptor to let the caller see it live.
             env: Environment for the transport command. None inherits it.
             start_new_session: Isolate the transport from local terminal signals.
+            tls: Optional controller certificate and remote trust settings.
 
         Returns:
             A connected instance. The caller must still enter its context.
@@ -1425,7 +1658,23 @@ class BaseProtocol:
             env=env,
             start_new_session=start_new_session,
         )
-        instance = await cls.from_subprocess(proc)
+        try:
+            instance = await cls.from_subprocess(proc, tls=tls)
+        except BaseException:
+            transport = proc._transport  # type: ignore[attr-defined]
+            for fd in (0, 1, 2):
+                pipe = transport.get_pipe_transport(fd)
+                if pipe is not None:
+                    pipe.close()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            finally:
+                transport.close()
+            raise
         instance._owned_process = proc  # type: ignore[attr-defined]
         return instance
 
@@ -1440,6 +1689,7 @@ class BaseProtocol:
         python: str = "python3",
         ssh_options: list[str] | None = None,
         stderr: int = asyncio.subprocess.PIPE,
+        tls: TLSConfig | None = None,
     ) -> Self:
         """Bootstrap a Protocol over SSH.
 
@@ -1466,7 +1716,7 @@ class BaseProtocol:
             cmd += ssh_options
         cmd += [host]
 
-        return await cls.from_command(*cmd, python=python, stderr=stderr)
+        return await cls.from_command(*cmd, python=python, stderr=stderr, tls=tls)
 
     @classmethod
     async def from_stdio(cls, logging_level: int = logging.INFO) -> Self:
@@ -1604,7 +1854,7 @@ R = TypeVar("R")
 
 
 class Protocol(BaseProtocol):
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
         super().__init__(reader, writer)
         # The key the peer registered every tool under, by class or module.
         self._tools_cache: dict[type[Tool] | ModuleType, str] = {}
@@ -1661,6 +1911,8 @@ class Protocol(BaseProtocol):
 
     async def __aenter__(self) -> Self:
         try:
+            if self._tls_context is not None:
+                await self.start_tls(self._tls_context, server_side=True, timeout=self._tls_timeout)
             try:
                 await self.write_boundary()
             except OSError as error:
@@ -2542,8 +2794,23 @@ class RemoteLogHandler(logging.Handler):
                 self.release()
 
 
-async def run() -> None:
+async def run(
+    *,
+    tls_server_hostname: str | None = None,
+    tls_ca_data: str | None = None,
+    tls_handshake_timeout: float = 10.0,
+) -> None:
     """remote endpoint entry point, do not call directly"""
     proto = await Protocol.from_stdio()
+    if tls_server_hostname is not None:
+        try:
+            context = ssl.create_default_context(cadata=tls_ca_data)
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+            await proto.start_tls(
+                context, server_side=False, server_hostname=tls_server_hostname, timeout=tls_handshake_timeout
+            )
+        except BaseException:
+            await proto.__aexit__(*sys.exc_info())
+            raise
     async with proto:
         await proto.wait_closed()
