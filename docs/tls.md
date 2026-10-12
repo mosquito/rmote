@@ -2,7 +2,9 @@
 
 Pass a `TLSConfig` to protect the rmote byte stream with TLS 1.3. Serialization,
 compression, headers, and frames all run above TLS. The configuration is opt-in;
-connections without it keep their existing behavior.
+Python connections without it keep their existing behavior. The `sshmux` CLI
+also enables TLS automatically when it finds a complete local certificate and
+key pair; see {doc}`sshmux` for its TLS options and XDG defaults.
 
 Both processes need Python with the standard-library `ssl` module and TLS 1.3
 support in OpenSSL. No third-party Python package is needed on either side.
