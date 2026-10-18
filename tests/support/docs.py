@@ -21,8 +21,8 @@ def subprocess_example(source: str, path: str, enabled: bool, caller: Any) -> No
     prefix = (
         "from rmote.protocol import Protocol, TLSConfig\n"
         "_factory = Protocol.from_subprocess\n"
-        "async def _with_tls(cls, process, *, tls=None):\n"
-        f"    return await _factory(process, tls=tls if tls is not None else {tls_for_mode(enabled)!r})\n"
+        "async def _with_tls(cls, process, *, tls=None, **kwargs):\n"
+        f"    return await _factory(process, tls=tls if tls is not None else {tls_for_mode(enabled)!r}, **kwargs)\n"
         "Protocol.from_subprocess = classmethod(_with_tls)\n"
     )
     caller(prefix + source, path)
@@ -65,9 +65,13 @@ def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) ->
     factory = Protocol.from_subprocess
 
     async def from_subprocess(
-        cls: type[Protocol], process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None
+        cls: type[Protocol],
+        process: asyncio.subprocess.Process,
+        *,
+        tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Protocol:
-        return await factory(process, tls=tls if tls is not None else transport_tls)
+        return await factory(process, tls=tls if tls is not None else transport_tls, decode_threshold=decode_threshold)
 
     monkeypatch.setattr(Protocol, "from_subprocess", classmethod(from_subprocess))
 

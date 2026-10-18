@@ -32,7 +32,7 @@ from collections.abc import (
     Iterable,
     Sequence,
 )
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from gzip import compress, decompress
@@ -721,6 +721,7 @@ class FragmentBuffer:
         # growing bytearray would copy them while it grows, and the immutable
         # result would copy every byte a second time.
         self.buffers: dict[int, list[bytes]] = {}
+        self.sizes: dict[int, int] = {}
         self.total_bytes = 0
 
     def store(self, packet_id: int, chunk: bytes) -> None:
@@ -731,9 +732,11 @@ class FragmentBuffer:
                 raise ValueError(f"Too many incomplete packets: {len(self.buffers) + 1}")
             buffer = []
             self.buffers[packet_id] = buffer
+            self.sizes[packet_id] = 0
         if self.total_bytes + len(chunk) > self.max_bytes:
             raise ValueError(f"Reassembly buffer overflow: {self.total_bytes + len(chunk)} bytes")
         buffer.append(chunk)
+        self.sizes[packet_id] = self.sizes.get(packet_id, 0) + len(chunk)
         self.total_bytes += len(chunk)
 
     def take(self, packet_id: int, tail: bytes) -> bytes:
@@ -741,13 +744,14 @@ class FragmentBuffer:
         buffer = self.buffers.pop(packet_id, None)
         if buffer is None:
             return tail
-        self.total_bytes -= sum(map(len, buffer))
+        self.total_bytes -= self.sizes.pop(packet_id)
         buffer.append(tail)
         return b"".join(buffer)
 
     def clear(self) -> None:
         """Drop every buffered fragment."""
         self.buffers.clear()
+        self.sizes.clear()
         self.total_bytes = 0
 
 
@@ -1172,6 +1176,13 @@ class BaseProtocol:
     COMPRESSION_INLINE = 256 * 1024
     DECOMPRESSION_INLINE = 32 * 1024
 
+    # Move large unpickles off the loop based on decoded, rather than wire bytes.
+    # A batch of 256 small (64-byte) stream items still fits the inline path.
+    DECODE_INLINE = 32 * 1024
+    # At most 1 MiB of decoded frames per hand-off. Stop on the first final
+    # frame as well, so an interleaved small response is returned immediately.
+    DECODE_FRAMES = 16
+
     # The frame codec compresses the body of each frame with one dictionary
     # per direction, which the sync flush of every compressed body keeps. It
     # replaces the policy that compressed each packet on its own: a small
@@ -1213,7 +1224,20 @@ class BaseProtocol:
     # with a clear error instead of waiting for room that cannot appear.
     MAX_STREAM_ITEM = 64 * 1024 * 1024
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
+    @staticmethod
+    def check_decode_threshold(value: int) -> None:
+        if type(value) is not int or (value != -1 and value <= 0):
+            raise ValueError("decode_threshold must be a positive integer or -1")
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter | TLSStream,
+        *,
+        decode_threshold: int = DECODE_INLINE,
+    ):
+        self.check_decode_threshold(decode_threshold)
+        self.decode_threshold = decode_threshold
         self.reader = reader
         self.writer = writer
         self.read_lock = asyncio.Lock()
@@ -1254,44 +1278,130 @@ class BaseProtocol:
 
         Frames of different packet_id can interleave. Fragments are buffered per
         packet_id, so a packet that completes first returns first.
+
+        Small payloads decode inline; large payloads use the default executor.
+        Source envelopes install and unpickle on the event loop. Cancellation
+        waits for an active worker before releasing the read lock, because its
+        zlib dictionary and fragment buffers belong to this direction.
         """
         async with self.read_lock:
-            while True:
-                header = await self.reader.readexactly(self.PACKET_HEADER.size)
-                magic, raw_flags, length, packet_id = self.PACKET_HEADER.unpack(header)
-                flags = Flags(raw_flags)
-                if magic != self.MAGIC:
-                    raise ValueError("Invalid magic number")
-                limit = self.FRAGMENT_SIZE
-                if flags & Flags.COMPRESSED and self.inflate is not None:
-                    # A density sample can accept incompressible data. Allow
-                    # deflate's block overhead and the sync-flush boundary;
-                    # FrameDecompressor still bounds the decoded body.
-                    limit += (limit >> 12) + (limit >> 14) + 32
-                if length > limit:
-                    raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
-                chunk = await self.reader.readexactly(length)
-                if flags & Flags.COMPRESSED and self.inflate is not None:
-                    # The dictionary follows the wire, so the body is inflated
-                    # here and not after the fragments of its packet are joined.
-                    chunk = self.inflate.decode(chunk)
-                    flags &= ~Flags.COMPRESSED
+            frames: list[tuple[bytes, Flags, int]] = []
+            try:
+                while True:
+                    header = await self.reader.readexactly(self.PACKET_HEADER.size)
+                    magic, raw_flags, length, packet_id = self.PACKET_HEADER.unpack(header)
+                    flags = Flags(raw_flags)
+                    fragmented = bool(flags & Flags.FRAGMENT)
+                    if magic != self.MAGIC:
+                        raise ValueError("Invalid magic number")
+                    limit = self.FRAGMENT_SIZE
+                    if flags & Flags.COMPRESSED and self.inflate is not None:
+                        # A density sample can accept incompressible data. Allow
+                        # deflate's block overhead and the sync-flush boundary;
+                        # FrameDecompressor still bounds the decoded body.
+                        limit += (limit >> 12) + (limit >> 14) + 32
+                    if length > limit:
+                        raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
+                    chunk = await self.reader.readexactly(length)
+                    if self.decode_threshold != -1 and (
+                        frames or self.fragments.sizes.get(packet_id, 0) > self.decode_threshold
+                    ):
+                        # Previously decoded fragments crossed the inline budget.
+                        # Read a bounded group before handing it off, keeping the
+                        # wire order even when frames of other packets interleave.
+                        frames.append((chunk, flags, packet_id))
+                        if fragmented and len(frames) < self.DECODE_FRAMES:
+                            continue
+                        pending, frames = frames, []
+                        packet = await self.decode_in_thread(self.decode_frames, pending)
+                        if packet is None:
+                            continue
+                        if packet.flags & Flags.MODULES:
+                            return self.decode_packet(packet.payload, packet.flags, packet.packet_id)
+                        return cast(Packet, packet)
+                    if flags & Flags.COMPRESSED and self.inflate is not None:
+                        # The dictionary follows the wire, so the body is inflated
+                        # here and not after the fragments of its packet are joined.
+                        chunk = self.inflate.decode(chunk)
+                        flags &= ~Flags.COMPRESSED
 
-                if flags & Flags.FRAGMENT:
-                    self.fragments.store(packet_id, chunk)
+                    if fragmented:
+                        self.fragments.store(packet_id, chunk)
+                        continue
+
+                    payload = self.fragments.take(packet_id, chunk)
+                    if flags & Flags.COMPRESSED:
+                        payload = await self.unpack(payload)
+                    # Source installation and the first import run on the loop:
+                    # transferred modules may initialize asyncio objects there.
+                    if (
+                        self.decode_threshold != -1
+                        and len(payload) > self.decode_threshold
+                        and not flags & Flags.MODULES
+                    ):
+                        return cast(Packet, await self.decode_in_thread(self.decode_packet, payload, flags, packet_id))
+                    return self.decode_packet(payload, flags, packet_id)
+
+            finally:
+                if frames:
+                    # Cancellation or EOF while reading the next frame must not
+                    # discard bodies already read from the zlib direction.
+                    await self.decode_in_thread(self.decode_frames, frames)
+
+    def decode_frames(self, frames: list[tuple[bytes, Flags, int]]) -> Packet | None:
+        """Inflate a bounded group in wire order and decode its final packet.
+
+        Only the last frame can complete a packet. A source envelope is handed
+        back as bytes, so its installation and decoding remain on the loop.
+        The caller holds read_lock until this worker finishes.
+        """
+        for chunk, flags, packet_id in frames:
+            if flags & Flags.COMPRESSED and self.inflate is not None:
+                chunk = self.inflate.decode(chunk)
+                flags &= ~Flags.COMPRESSED
+            if flags & Flags.FRAGMENT:
+                self.fragments.store(packet_id, chunk)
+                continue
+            payload = self.fragments.take(packet_id, chunk)
+            if flags & Flags.COMPRESSED:
+                payload = decompress(payload)
+            if flags & Flags.MODULES:
+                return Packet(payload, flags, packet_id, len(payload))
+            return self.decode_packet(payload, flags, packet_id)
+        return None
+
+    def decode_packet(self, payload: bytes, flags: Flags, packet_id: int) -> Packet:
+        """Decode one reassembled packet; install source envelopes on the loop."""
+        size = len(payload)
+        if flags & Flags.MODULES:
+            sources, payload = pickle.loads(payload)
+            ModuleLoader.install(sources)
+            self.known_modules.update(sources)
+        value = self.split(payload) if flags & Flags.BATCH else pickle.loads(payload)
+        return Packet(value, flags, packet_id, size)
+
+    @staticmethod
+    async def decode_in_thread(function: Callable[..., Any], *args: Any) -> Any:
+        """Run decoding off the loop without releasing its state on cancellation.
+
+        Cancelling an executor future cannot stop its function. Keep the caller's
+        read lock until it finishes, including repeated cancellation, so the
+        next frame never races a worker that still advances the zlib dictionary.
+        """
+        worker = asyncio.get_running_loop().run_in_executor(None, copy_context().run, function, *args)
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
                     continue
-
-                payload = self.fragments.take(packet_id, chunk)
-                if flags & Flags.COMPRESSED:
-                    payload = await self.unpack(payload)
-                size = len(payload)
-                if flags & Flags.MODULES:
-                    sources, payload = pickle.loads(payload)
-                    ModuleLoader.install(sources)
-                    self.known_modules.update(sources)
-                if flags & Flags.BATCH:
-                    return Packet(self.split(payload), flags, packet_id, size)
-                return Packet(pickle.loads(payload), flags, packet_id, size)
+                except Exception:
+                    break
+            if not worker.cancelled():
+                worker.exception()
+            raise
 
     async def send(self, packet: Any, flags: Flags, packet_id: int) -> None:
         flags = Flags(flags)
@@ -1418,7 +1528,7 @@ class BaseProtocol:
         work is proportional to the result, which a high ratio makes much
         larger than the frame that carries it.
         """
-        if len(payload) <= self.DECOMPRESSION_INLINE:
+        if self.decode_threshold == -1 or len(payload) <= self.DECOMPRESSION_INLINE:
             return decompress(payload)
         return cast(bytes, await asyncio.to_thread(decompress, payload))
 
@@ -1597,19 +1707,27 @@ class BaseProtocol:
                     said.append(spoken)
 
     @classmethod
-    async def from_subprocess(cls, process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None) -> Self:
+    async def from_subprocess(
+        cls,
+        process: asyncio.subprocess.Process,
+        *,
+        tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
+    ) -> Self:
+        cls.check_decode_threshold(decode_threshold)
         assert process.stdin is not None, "Process stdin must not be None"
         assert process.stdout is not None, "Process stdout must not be None"
         context, ca_data = tls.prepare() if tls is not None else (None, None)
         process.stdin.write(bootstrap_payload())
         if tls is None:
-            process.stdin.write(b"asyncio.run(_protocol.run())\n")
+            process.stdin.write(f"asyncio.run(_protocol.run(decode_threshold={decode_threshold!r}))\n".encode())
         else:
             process.stdin.write(
                 f"asyncio.run(_protocol.run(tls_server_hostname={tls.server_hostname!r}, "
-                f"tls_ca_data={ca_data!r}, tls_handshake_timeout={tls.handshake_timeout!r}))\n".encode()
+                f"tls_ca_data={ca_data!r}, tls_handshake_timeout={tls.handshake_timeout!r}, "
+                f"decode_threshold={decode_threshold!r}))\n".encode()
             )
-        instance = cls(reader=process.stdout, writer=process.stdin)
+        instance = cls(reader=process.stdout, writer=process.stdin, decode_threshold=decode_threshold)
         instance._tls_context = context
         if tls is not None:
             instance._tls_timeout = tls.handshake_timeout
@@ -1629,6 +1747,7 @@ class BaseProtocol:
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
         tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
     ) -> Self:
         """Bootstrap a Protocol over any command that starts a remote Python REPL.
 
@@ -1647,10 +1766,13 @@ class BaseProtocol:
             env: Environment for the transport command. None inherits it.
             start_new_session: Isolate the transport from local terminal signals.
             tls: Optional controller certificate and remote trust settings.
+            decode_threshold: Decoded packet bytes above which receive uses a
+                worker, on both endpoints. Default 32 KiB; -1 disables workers.
 
         Returns:
             A connected instance. The caller must still enter its context.
         """
+        cls.check_decode_threshold(decode_threshold)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             python,
@@ -1662,7 +1784,7 @@ class BaseProtocol:
             start_new_session=start_new_session,
         )
         try:
-            instance = await cls.from_subprocess(proc, tls=tls)
+            instance = await cls.from_subprocess(proc, tls=tls, decode_threshold=decode_threshold)
         except BaseException:
             transport = proc._transport  # type: ignore[attr-defined]
             for fd in (0, 1, 2):
@@ -1693,6 +1815,7 @@ class BaseProtocol:
         ssh_options: list[str] | None = None,
         stderr: int = asyncio.subprocess.PIPE,
         tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
     ) -> Self:
         """Bootstrap a Protocol over SSH.
 
@@ -1719,10 +1842,11 @@ class BaseProtocol:
             cmd += ssh_options
         cmd += [host]
 
-        return await cls.from_command(*cmd, python=python, stderr=stderr, tls=tls)
+        return await cls.from_command(*cmd, python=python, stderr=stderr, tls=tls, decode_threshold=decode_threshold)
 
     @classmethod
-    async def from_stdio(cls, logging_level: int = logging.INFO) -> Self:
+    async def from_stdio(cls, logging_level: int = logging.INFO, *, decode_threshold: int = DECODE_INLINE) -> Self:
+        cls.check_decode_threshold(decode_threshold)
         loop = asyncio.get_running_loop()
 
         # Protect the protocol channel from accidental corruption.
@@ -1781,7 +1905,7 @@ class BaseProtocol:
         finally:
             os.close(report_fd)
 
-        protocol = cls(reader, writer)
+        protocol = cls(reader, writer, decode_threshold=decode_threshold)
         log_handler = RemoteLogHandler(protocol, loop, paused=True)  # type: ignore[arg-type]
         protocol.log_handler = log_handler  # type: ignore[attr-defined]
         root_logger = logging.getLogger()
@@ -1857,8 +1981,14 @@ R = TypeVar("R")
 
 
 class Protocol(BaseProtocol):
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
-        super().__init__(reader, writer)
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter | TLSStream,
+        *,
+        decode_threshold: int = BaseProtocol.DECODE_INLINE,
+    ):
+        super().__init__(reader, writer, decode_threshold=decode_threshold)
         # The key the peer registered every tool under, by class or module.
         self._tools_cache: dict[type[Tool] | ModuleType, str] = {}
         # Keyed by the name of a bundle root, or by a class that has no bundle.
@@ -2833,12 +2963,13 @@ class RemoteLogHandler(logging.Handler):
 
 async def run(
     *,
+    decode_threshold: int = BaseProtocol.DECODE_INLINE,
     tls_server_hostname: str | None = None,
     tls_ca_data: str | None = None,
     tls_handshake_timeout: float = 10.0,
 ) -> None:
     """remote endpoint entry point, do not call directly"""
-    proto = await Protocol.from_stdio()
+    proto = await Protocol.from_stdio(decode_threshold=decode_threshold)
     if tls_server_hostname is not None:
         try:
             context = ssl.create_default_context(cadata=tls_ca_data)
