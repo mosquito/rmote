@@ -1274,6 +1274,7 @@ class BaseProtocol:
                     header = await self.reader.readexactly(self.PACKET_HEADER.size)
                     magic, raw_flags, length, packet_id = self.PACKET_HEADER.unpack(header)
                     flags = Flags(raw_flags)
+                    fragmented = bool(flags & Flags.FRAGMENT)
                     if magic != self.MAGIC:
                         raise ValueError("Invalid magic number")
                     limit = self.FRAGMENT_SIZE
@@ -1285,14 +1286,12 @@ class BaseProtocol:
                     if length > limit:
                         raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
                     chunk = await self.reader.readexactly(length)
-                    if self.inflate is not None and (
-                        frames or flags & Flags.FRAGMENT or packet_id in self.fragments.buffers
-                    ):
+                    if self.inflate is not None and (frames or fragmented or packet_id in self.fragments.buffers):
                         # A fragmented packet is already above the inline budget.
                         # Read a bounded group before handing it off, keeping the
                         # wire order even when frames of other packets interleave.
                         frames.append((chunk, flags, packet_id))
-                        if flags & Flags.FRAGMENT and len(frames) < self.DECODE_FRAMES:
+                        if fragmented and len(frames) < self.DECODE_FRAMES:
                             continue
                         pending, frames = frames, []
                         packet = await self.decode_in_thread(self.decode_frames, pending)
@@ -1307,7 +1306,7 @@ class BaseProtocol:
                         chunk = self.inflate.decode(chunk)
                         flags &= ~Flags.COMPRESSED
 
-                    if flags & Flags.FRAGMENT:
+                    if fragmented:
                         self.fragments.store(packet_id, chunk)
                         continue
 
