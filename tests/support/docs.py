@@ -21,8 +21,8 @@ def subprocess_example(source: str, path: str, enabled: bool, caller: Any) -> No
     prefix = (
         "from rmote.protocol import Protocol, TLSConfig\n"
         "_factory = Protocol.from_subprocess\n"
-        "async def _with_tls(cls, process, *, tls=None):\n"
-        f"    return await _factory(process, tls=tls if tls is not None else {tls_for_mode(enabled)!r})\n"
+        "async def _with_tls(cls, process, *, tls=None, **kwargs):\n"
+        f"    return await _factory(process, tls=tls if tls is not None else {tls_for_mode(enabled)!r}, **kwargs)\n"
         "Protocol.from_subprocess = classmethod(_with_tls)\n"
     )
     caller(prefix + source, path)
