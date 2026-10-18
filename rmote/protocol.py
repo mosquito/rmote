@@ -32,7 +32,7 @@ from collections.abc import (
     Iterable,
     Sequence,
 )
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from gzip import compress, decompress
@@ -1172,6 +1172,13 @@ class BaseProtocol:
     COMPRESSION_INLINE = 256 * 1024
     DECOMPRESSION_INLINE = 32 * 1024
 
+    # Move large unpickles off the loop based on decoded, rather than wire bytes.
+    # A batch of 256 small (64-byte) stream items still fits the inline path.
+    DECODE_INLINE = 32 * 1024
+    # At most 1 MiB of decoded frames per hand-off. Stop on the first final
+    # frame as well, so an interleaved small response is returned immediately.
+    DECODE_FRAMES = 16
+
     # The frame codec compresses the body of each frame with one dictionary
     # per direction, which the sync flush of every compressed body keeps. It
     # replaces the policy that compressed each packet on its own: a small
@@ -1254,44 +1261,124 @@ class BaseProtocol:
 
         Frames of different packet_id can interleave. Fragments are buffered per
         packet_id, so a packet that completes first returns first.
+
+        Small payloads decode inline; large payloads use the default executor.
+        Source envelopes install and unpickle on the event loop. Cancellation
+        waits for an active worker before releasing the read lock, because its
+        zlib dictionary and fragment buffers belong to this direction.
         """
         async with self.read_lock:
-            while True:
-                header = await self.reader.readexactly(self.PACKET_HEADER.size)
-                magic, raw_flags, length, packet_id = self.PACKET_HEADER.unpack(header)
-                flags = Flags(raw_flags)
-                if magic != self.MAGIC:
-                    raise ValueError("Invalid magic number")
-                limit = self.FRAGMENT_SIZE
-                if flags & Flags.COMPRESSED and self.inflate is not None:
-                    # A density sample can accept incompressible data. Allow
-                    # deflate's block overhead and the sync-flush boundary;
-                    # FrameDecompressor still bounds the decoded body.
-                    limit += (limit >> 12) + (limit >> 14) + 32
-                if length > limit:
-                    raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
-                chunk = await self.reader.readexactly(length)
-                if flags & Flags.COMPRESSED and self.inflate is not None:
-                    # The dictionary follows the wire, so the body is inflated
-                    # here and not after the fragments of its packet are joined.
-                    chunk = self.inflate.decode(chunk)
-                    flags &= ~Flags.COMPRESSED
+            frames: list[tuple[bytes, Flags, int]] = []
+            try:
+                while True:
+                    header = await self.reader.readexactly(self.PACKET_HEADER.size)
+                    magic, raw_flags, length, packet_id = self.PACKET_HEADER.unpack(header)
+                    flags = Flags(raw_flags)
+                    if magic != self.MAGIC:
+                        raise ValueError("Invalid magic number")
+                    limit = self.FRAGMENT_SIZE
+                    if flags & Flags.COMPRESSED and self.inflate is not None:
+                        # A density sample can accept incompressible data. Allow
+                        # deflate's block overhead and the sync-flush boundary;
+                        # FrameDecompressor still bounds the decoded body.
+                        limit += (limit >> 12) + (limit >> 14) + 32
+                    if length > limit:
+                        raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
+                    chunk = await self.reader.readexactly(length)
+                    if self.inflate is not None and (
+                        frames or flags & Flags.FRAGMENT or packet_id in self.fragments.buffers
+                    ):
+                        # A fragmented packet is already above the inline budget.
+                        # Read a bounded group before handing it off, keeping the
+                        # wire order even when frames of other packets interleave.
+                        frames.append((chunk, flags, packet_id))
+                        if flags & Flags.FRAGMENT and len(frames) < self.DECODE_FRAMES:
+                            continue
+                        pending, frames = frames, []
+                        packet = await self.decode_in_thread(self.decode_frames, pending)
+                        if packet is None:
+                            continue
+                        if packet.flags & Flags.MODULES:
+                            return self.decode_packet(packet.payload, packet.flags, packet.packet_id)
+                        return cast(Packet, packet)
+                    if flags & Flags.COMPRESSED and self.inflate is not None:
+                        # The dictionary follows the wire, so the body is inflated
+                        # here and not after the fragments of its packet are joined.
+                        chunk = self.inflate.decode(chunk)
+                        flags &= ~Flags.COMPRESSED
 
-                if flags & Flags.FRAGMENT:
-                    self.fragments.store(packet_id, chunk)
+                    if flags & Flags.FRAGMENT:
+                        self.fragments.store(packet_id, chunk)
+                        continue
+
+                    payload = self.fragments.take(packet_id, chunk)
+                    if flags & Flags.COMPRESSED:
+                        payload = await self.unpack(payload)
+                    # Source installation and the first import run on the loop:
+                    # transferred modules may initialize asyncio objects there.
+                    if len(payload) > self.DECODE_INLINE and not flags & Flags.MODULES:
+                        return cast(Packet, await self.decode_in_thread(self.decode_packet, payload, flags, packet_id))
+                    return self.decode_packet(payload, flags, packet_id)
+
+            finally:
+                if frames:
+                    # Cancellation or EOF while reading the next frame must not
+                    # discard bodies already read from the zlib direction.
+                    await self.decode_in_thread(self.decode_frames, frames)
+
+    def decode_frames(self, frames: list[tuple[bytes, Flags, int]]) -> Packet | None:
+        """Inflate a bounded group in wire order and decode its final packet.
+
+        Only the last frame can complete a packet. A source envelope is handed
+        back as bytes, so its installation and decoding remain on the loop.
+        The caller holds read_lock until this worker finishes.
+        """
+        assert self.inflate is not None
+        for chunk, flags, packet_id in frames:
+            if flags & Flags.COMPRESSED:
+                chunk = self.inflate.decode(chunk)
+                flags &= ~Flags.COMPRESSED
+            if flags & Flags.FRAGMENT:
+                self.fragments.store(packet_id, chunk)
+                continue
+            payload = self.fragments.take(packet_id, chunk)
+            if flags & Flags.MODULES:
+                return Packet(payload, flags, packet_id, len(payload))
+            return self.decode_packet(payload, flags, packet_id)
+        return None
+
+    def decode_packet(self, payload: bytes, flags: Flags, packet_id: int) -> Packet:
+        """Decode one reassembled packet; install source envelopes on the loop."""
+        size = len(payload)
+        if flags & Flags.MODULES:
+            sources, payload = pickle.loads(payload)
+            ModuleLoader.install(sources)
+            self.known_modules.update(sources)
+        value = self.split(payload) if flags & Flags.BATCH else pickle.loads(payload)
+        return Packet(value, flags, packet_id, size)
+
+    @staticmethod
+    async def decode_in_thread(function: Callable[..., Any], *args: Any) -> Any:
+        """Run decoding off the loop without releasing its state on cancellation.
+
+        Cancelling an executor future cannot stop its function. Keep the caller's
+        read lock until it finishes, including repeated cancellation, so the
+        next frame never races a worker that still advances the zlib dictionary.
+        """
+        worker = asyncio.get_running_loop().run_in_executor(None, copy_context().run, function, *args)
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
                     continue
-
-                payload = self.fragments.take(packet_id, chunk)
-                if flags & Flags.COMPRESSED:
-                    payload = await self.unpack(payload)
-                size = len(payload)
-                if flags & Flags.MODULES:
-                    sources, payload = pickle.loads(payload)
-                    ModuleLoader.install(sources)
-                    self.known_modules.update(sources)
-                if flags & Flags.BATCH:
-                    return Packet(self.split(payload), flags, packet_id, size)
-                return Packet(pickle.loads(payload), flags, packet_id, size)
+                except Exception:
+                    break
+            if not worker.cancelled():
+                worker.exception()
+            raise
 
     async def send(self, packet: Any, flags: Flags, packet_id: int) -> None:
         flags = Flags(flags)
