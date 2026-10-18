@@ -65,9 +65,16 @@ def frames(count: int, batch: int, streams: int) -> list[bytes]:
     return result
 
 
-async def measure(wire: list[bytes], count: int, batch: int, rate: int, burst: int) -> dict[str, float]:
+async def measure(
+    wire: list[bytes],
+    count: int,
+    batch: int,
+    rate: int,
+    burst: int,
+    decode_threshold: int = BaseProtocol.DECODE_INLINE,
+) -> dict[str, float]:
     reader = asyncio.StreamReader()
-    remote = BaseProtocol(reader, cast(Any, None))
+    remote = BaseProtocol(reader, cast(Any, None), decode_threshold=decode_threshold)
     remote.inflate = FrameDecompressor(remote.FRAGMENT_SIZE)
     pauses: list[float] = []
     loop = asyncio.get_running_loop()
@@ -125,7 +132,9 @@ async def main() -> None:
     parser.add_argument("--streams", type=int, default=38)
     parser.add_argument("--burst", type=int, default=1, help="Batches released together at the same average rate.")
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--decode-threshold", type=int, default=BaseProtocol.DECODE_INLINE)
     options = parser.parse_args()
+    BaseProtocol.check_decode_threshold(options.decode_threshold)
     if min(options.seconds, options.batch, options.streams, options.rounds, options.burst) < 1 or options.rate < 0:
         parser.error("sizes and counts must be positive; rate must be nonnegative")
     count = 30000 * options.seconds
@@ -133,8 +142,13 @@ async def main() -> None:
     print(
         f"{count} records; batch={options.batch}; streams={options.streams}; rate={options.rate}; burst={options.burst}"
     )
-    await measure(wire[:4], min(count, options.batch * 4), options.batch, options.rate, options.burst)
-    rows = [await measure(wire, count, options.batch, options.rate, options.burst) for _ in range(options.rounds)]
+    await measure(
+        wire[:4], min(count, options.batch * 4), options.batch, options.rate, options.burst, options.decode_threshold
+    )
+    rows = [
+        await measure(wire, count, options.batch, options.rate, options.burst, options.decode_threshold)
+        for _ in range(options.rounds)
+    ]
     for index, row in enumerate(rows):
         print(f"round {index + 1}: {row}")
     print("median:", {key: statistics.median(row[key] for row in rows) for key in rows[0]})

@@ -79,6 +79,7 @@ class Connection:
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
         tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Self:
         """Connect through a command that passes stdin and stdout unchanged.
 
@@ -94,6 +95,9 @@ class Connection:
 
         ``tls`` establishes TLS before the protocol handshake. Its certificate
         paths are local. Bootstrap still requires a trusted transport.
+
+        ``decode_threshold`` sets the receive worker threshold in decoded bytes
+        on both endpoints (default 32 KiB). Pass -1 to decode inline throughout.
         """
         return cls._connect(
             [*argv, python, "-qui"],
@@ -104,6 +108,7 @@ class Connection:
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
             tls=tls,
+            decode_threshold=decode_threshold,
             start_new_session=start_new_session,
         )
 
@@ -119,6 +124,7 @@ class Connection:
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
         tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Self:
         """Start a local Python interpreter and complete its protocol handshake.
 
@@ -135,6 +141,7 @@ class Connection:
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
             tls=tls,
+            decode_threshold=decode_threshold,
         )
 
     @classmethod
@@ -152,6 +159,7 @@ class Connection:
         rpc_timeout: float | None = None,
         close_timeout: float = 5.0,
         tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Self:
         """Start SSH and complete the remote Python protocol handshake."""
         cmd = ["ssh", "-T"]
@@ -172,6 +180,7 @@ class Connection:
             rpc_timeout=rpc_timeout,
             close_timeout=close_timeout,
             tls=tls,
+            decode_threshold=decode_threshold,
         )
 
     @classmethod
@@ -187,7 +196,9 @@ class Connection:
         close_timeout: float,
         start_new_session: bool = False,
         tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Self:
+        Protocol.check_decode_threshold(decode_threshold)
         _check_timeout(connect_timeout, "connect_timeout")
         _check_timeout(rpc_timeout, "rpc_timeout")
         _check_timeout(close_timeout, "close_timeout", optional=False)
@@ -196,7 +207,9 @@ class Connection:
         connection._close_timeout = close_timeout
         try:
             connection._runtime.run(
-                lambda: connection._open(cmd, cwd, env, stderr, connect_timeout, start_new_session, tls)
+                lambda: connection._open(
+                    cmd, cwd, env, stderr, connect_timeout, start_new_session, tls, decode_threshold
+                )
             )
         except BaseException:
             try:
@@ -216,6 +229,7 @@ class Connection:
         timeout: float | None,
         start_new_session: bool = False,
         tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> None:
         self._loop_thread = threading.current_thread()
         async with asyncio.timeout(timeout):
@@ -235,7 +249,7 @@ class Connection:
             self._process = await asyncio.shield(self._spawn_task)
             # The protocol reads the transport stderr itself, and it keeps the
             # lines of the start for the failure of the handshake.
-            self._protocol = await Protocol.from_subprocess(self._process, tls=tls)
+            self._protocol = await Protocol.from_subprocess(self._process, tls=tls, decode_threshold=decode_threshold)
             await self._protocol.__aenter__()
 
     def _start_stderr_reader(self) -> None:

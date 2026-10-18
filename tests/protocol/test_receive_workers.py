@@ -11,7 +11,12 @@ import pytest
 from rmote.protocol import BaseProtocol, Flags, FrameCompressor, FrameDecompressor, ModuleLoader, ModuleSource
 
 
-def receiver(payloads: list[tuple[bytes, Flags]], *, compressed: bool = True) -> BaseProtocol:
+def receiver(
+    payloads: list[tuple[bytes, Flags]],
+    *,
+    compressed: bool = True,
+    decode_threshold: int = BaseProtocol.DECODE_INLINE,
+) -> BaseProtocol:
     reader = asyncio.StreamReader()
     encoder = FrameCompressor(3, 256, 128)
     for packet_id, (payload, flags) in enumerate(payloads):
@@ -24,7 +29,7 @@ def receiver(payloads: list[tuple[bytes, Flags]], *, compressed: bool = True) ->
             reader.feed_data(BaseProtocol.PACKET_HEADER.pack(BaseProtocol.MAGIC, frame_flags, len(body), packet_id))
             reader.feed_data(body)
     reader.feed_eof()
-    instance = BaseProtocol(reader, cast(Any, None))
+    instance = BaseProtocol(reader, cast(Any, None), decode_threshold=decode_threshold)
     instance.inflate = FrameDecompressor(instance.FRAGMENT_SIZE)
     return instance
 
@@ -45,7 +50,7 @@ async def test_large_payloads_decode_in_workers_in_wire_order(monkeypatch, compr
         payloads = [pickle.dumps(value) for value in values]
     instance = receiver([(payload, flags) for payload in payloads], compressed=compressed)
     # Distinct strings keep the ordinary pickle large as well as the batch.
-    instance.DECODE_INLINE = 1024
+    instance.decode_threshold = 1024
     decoded_on: list[int] = []
     original = pickle.loads
 
@@ -205,7 +210,7 @@ async def test_cancelling_a_partial_group_keeps_its_dictionary_and_fragments():
 
         async def readexactly(self, size: int) -> bytes:
             self.reads += 1
-            if self.reads == 3:
+            if self.reads == 5:
                 waiting.set()
             return await super().readexactly(size)
 
@@ -213,7 +218,7 @@ async def test_cancelling_a_partial_group_keeps_its_dictionary_and_fragments():
     instance = BaseProtocol(reader, cast(Any, None))
     instance.inflate = FrameDecompressor(instance.FRAGMENT_SIZE)
     encoder = FrameCompressor(3, 256, 128)
-    value = b"partial" * 10000
+    value = b"partial" * 20000
     payload = pickle.dumps(value)
 
     def feed(body: bytes, flags: Flags, packet_id: int) -> None:
@@ -226,14 +231,15 @@ async def test_cancelling_a_partial_group_keeps_its_dictionary_and_fragments():
         )
 
     feed(payload[: instance.FRAGMENT_SIZE], Flags.FRAGMENT | Flags.RPC, 1)
+    feed(payload[instance.FRAGMENT_SIZE : instance.FRAGMENT_SIZE * 2], Flags.FRAGMENT | Flags.RPC, 1)
     task = asyncio.create_task(instance.receive())
     await waiting.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert instance.fragments.total_bytes == instance.FRAGMENT_SIZE
+    assert instance.fragments.total_bytes == instance.FRAGMENT_SIZE * 2
     feed(pickle.dumps("other"), Flags.RPC, 2)
-    feed(payload[instance.FRAGMENT_SIZE :], Flags.RPC, 1)
+    feed(payload[instance.FRAGMENT_SIZE * 2 :], Flags.RPC, 1)
     reader.feed_eof()
     assert (await instance.receive()).payload == "other"
     assert (await instance.receive()).payload == value
@@ -276,5 +282,83 @@ async def test_grouped_fragments_return_an_interleaved_response_first(monkeypatc
     monkeypatch.setattr(instance, "decode_frames", observed)
     assert (await instance.receive()).payload == "interleaved"
     assert (await instance.receive()).payload == value
-    assert groups == [2, instance.DECODE_FRAMES, 1]
+    assert groups == [instance.DECODE_FRAMES, 1]
     assert not instance.fragments.buffers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compressed", [False, True], ids=["raw", "zlib"])
+@pytest.mark.parametrize("threshold", [-1, BaseProtocol.FRAGMENT_SIZE * 4], ids=["disabled", "above-packet"])
+async def test_fragmented_packets_stay_inline_below_threshold(monkeypatch, compressed, threshold):
+    value = b"journal" * 20000
+    instance = receiver([(pickle.dumps(value), Flags.RPC)], compressed=compressed, decode_threshold=threshold)
+
+    async def unexpected(*args):
+        pytest.fail("Receive worker disabled or packet below threshold")
+
+    monkeypatch.setattr(instance, "decode_in_thread", unexpected)
+    assert (await instance.receive()).payload == value
+    assert instance.fragments.total_bytes == 0
+    assert not instance.fragments.sizes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+async def test_threshold_uses_decoded_bytes_and_excludes_the_boundary(monkeypatch, offset):
+    value = b"x" * 10000
+    payload = pickle.dumps(value)
+    instance = receiver([(payload, Flags.RPC)], decode_threshold=len(payload) + offset)
+    submitted = []
+    original = instance.decode_in_thread
+
+    async def observed(function, *args):
+        submitted.append(function)
+        return await original(function, *args)
+
+    monkeypatch.setattr(instance, "decode_in_thread", observed)
+    assert (await instance.receive()).payload == value
+    assert bool(submitted) == (offset == -1)
+
+
+@pytest.mark.asyncio
+async def test_disabled_workers_include_legacy_gzip(monkeypatch):
+    from gzip import compress
+    from os import urandom
+
+    value = urandom(BaseProtocol.DECOMPRESSION_INLINE * 2)
+    instance = receiver([(b"", Flags.RPC)], decode_threshold=-1)
+
+    async def unexpected(*args):
+        pytest.fail("Legacy receive must also stay inline")
+
+    monkeypatch.setattr(asyncio, "to_thread", unexpected)
+    assert await instance.unpack(compress(value)) == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", [-1, 1, 1000000])
+async def test_protocol_threshold_reaches_remote(transport_tls, threshold):
+    from rmote.protocol import Protocol
+    from tests.support.tool_cases.decode import DecodeProbe, DecodeThread
+
+    async with await Protocol.from_command(
+        python=sys.executable, tls=transport_tls, decode_threshold=threshold
+    ) as remote:
+        assert remote.decode_threshold == threshold
+        assert await remote(DecodeProbe.inspect) == [threshold]
+        # Warm sources first: the next large request has no MODULES envelope.
+        on_loop = await remote(DecodeProbe.thread, DecodeThread(), b"x" * 200000)
+        assert on_loop == (threshold != 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", [0, -2, True, 1.5])
+async def test_invalid_threshold_does_not_start_a_process(monkeypatch, threshold):
+    from rmote.protocol import Protocol
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Invalid threshold must fail before process creation")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected)
+    with pytest.raises(ValueError, match="decode_threshold"):
+        await Protocol.from_command(decode_threshold=threshold)

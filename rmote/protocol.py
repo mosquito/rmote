@@ -721,6 +721,7 @@ class FragmentBuffer:
         # growing bytearray would copy them while it grows, and the immutable
         # result would copy every byte a second time.
         self.buffers: dict[int, list[bytes]] = {}
+        self.sizes: dict[int, int] = {}
         self.total_bytes = 0
 
     def store(self, packet_id: int, chunk: bytes) -> None:
@@ -731,9 +732,11 @@ class FragmentBuffer:
                 raise ValueError(f"Too many incomplete packets: {len(self.buffers) + 1}")
             buffer = []
             self.buffers[packet_id] = buffer
+            self.sizes[packet_id] = 0
         if self.total_bytes + len(chunk) > self.max_bytes:
             raise ValueError(f"Reassembly buffer overflow: {self.total_bytes + len(chunk)} bytes")
         buffer.append(chunk)
+        self.sizes[packet_id] = self.sizes.get(packet_id, 0) + len(chunk)
         self.total_bytes += len(chunk)
 
     def take(self, packet_id: int, tail: bytes) -> bytes:
@@ -741,13 +744,14 @@ class FragmentBuffer:
         buffer = self.buffers.pop(packet_id, None)
         if buffer is None:
             return tail
-        self.total_bytes -= sum(map(len, buffer))
+        self.total_bytes -= self.sizes.pop(packet_id)
         buffer.append(tail)
         return b"".join(buffer)
 
     def clear(self) -> None:
         """Drop every buffered fragment."""
         self.buffers.clear()
+        self.sizes.clear()
         self.total_bytes = 0
 
 
@@ -1220,7 +1224,20 @@ class BaseProtocol:
     # with a clear error instead of waiting for room that cannot appear.
     MAX_STREAM_ITEM = 64 * 1024 * 1024
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
+    @staticmethod
+    def check_decode_threshold(value: int) -> None:
+        if type(value) is not int or (value != -1 and value <= 0):
+            raise ValueError("decode_threshold must be a positive integer or -1")
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter | TLSStream,
+        *,
+        decode_threshold: int = DECODE_INLINE,
+    ):
+        self.check_decode_threshold(decode_threshold)
+        self.decode_threshold = decode_threshold
         self.reader = reader
         self.writer = writer
         self.read_lock = asyncio.Lock()
@@ -1286,8 +1303,10 @@ class BaseProtocol:
                     if length > limit:
                         raise ValueError(f"Frame of {length} bytes is above the limit of {limit}")
                     chunk = await self.reader.readexactly(length)
-                    if self.inflate is not None and (frames or fragmented or packet_id in self.fragments.buffers):
-                        # A fragmented packet is already above the inline budget.
+                    if self.decode_threshold != -1 and (
+                        frames or self.fragments.sizes.get(packet_id, 0) > self.decode_threshold
+                    ):
+                        # Previously decoded fragments crossed the inline budget.
                         # Read a bounded group before handing it off, keeping the
                         # wire order even when frames of other packets interleave.
                         frames.append((chunk, flags, packet_id))
@@ -1315,7 +1334,11 @@ class BaseProtocol:
                         payload = await self.unpack(payload)
                     # Source installation and the first import run on the loop:
                     # transferred modules may initialize asyncio objects there.
-                    if len(payload) > self.DECODE_INLINE and not flags & Flags.MODULES:
+                    if (
+                        self.decode_threshold != -1
+                        and len(payload) > self.decode_threshold
+                        and not flags & Flags.MODULES
+                    ):
                         return cast(Packet, await self.decode_in_thread(self.decode_packet, payload, flags, packet_id))
                     return self.decode_packet(payload, flags, packet_id)
 
@@ -1332,15 +1355,16 @@ class BaseProtocol:
         back as bytes, so its installation and decoding remain on the loop.
         The caller holds read_lock until this worker finishes.
         """
-        assert self.inflate is not None
         for chunk, flags, packet_id in frames:
-            if flags & Flags.COMPRESSED:
+            if flags & Flags.COMPRESSED and self.inflate is not None:
                 chunk = self.inflate.decode(chunk)
                 flags &= ~Flags.COMPRESSED
             if flags & Flags.FRAGMENT:
                 self.fragments.store(packet_id, chunk)
                 continue
             payload = self.fragments.take(packet_id, chunk)
+            if flags & Flags.COMPRESSED:
+                payload = decompress(payload)
             if flags & Flags.MODULES:
                 return Packet(payload, flags, packet_id, len(payload))
             return self.decode_packet(payload, flags, packet_id)
@@ -1504,7 +1528,7 @@ class BaseProtocol:
         work is proportional to the result, which a high ratio makes much
         larger than the frame that carries it.
         """
-        if len(payload) <= self.DECOMPRESSION_INLINE:
+        if self.decode_threshold == -1 or len(payload) <= self.DECOMPRESSION_INLINE:
             return decompress(payload)
         return cast(bytes, await asyncio.to_thread(decompress, payload))
 
@@ -1683,19 +1707,27 @@ class BaseProtocol:
                     said.append(spoken)
 
     @classmethod
-    async def from_subprocess(cls, process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None) -> Self:
+    async def from_subprocess(
+        cls,
+        process: asyncio.subprocess.Process,
+        *,
+        tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
+    ) -> Self:
+        cls.check_decode_threshold(decode_threshold)
         assert process.stdin is not None, "Process stdin must not be None"
         assert process.stdout is not None, "Process stdout must not be None"
         context, ca_data = tls.prepare() if tls is not None else (None, None)
         process.stdin.write(bootstrap_payload())
         if tls is None:
-            process.stdin.write(b"asyncio.run(_protocol.run())\n")
+            process.stdin.write(f"asyncio.run(_protocol.run(decode_threshold={decode_threshold!r}))\n".encode())
         else:
             process.stdin.write(
                 f"asyncio.run(_protocol.run(tls_server_hostname={tls.server_hostname!r}, "
-                f"tls_ca_data={ca_data!r}, tls_handshake_timeout={tls.handshake_timeout!r}))\n".encode()
+                f"tls_ca_data={ca_data!r}, tls_handshake_timeout={tls.handshake_timeout!r}, "
+                f"decode_threshold={decode_threshold!r}))\n".encode()
             )
-        instance = cls(reader=process.stdout, writer=process.stdin)
+        instance = cls(reader=process.stdout, writer=process.stdin, decode_threshold=decode_threshold)
         instance._tls_context = context
         if tls is not None:
             instance._tls_timeout = tls.handshake_timeout
@@ -1715,6 +1747,7 @@ class BaseProtocol:
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
         tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
     ) -> Self:
         """Bootstrap a Protocol over any command that starts a remote Python REPL.
 
@@ -1733,10 +1766,13 @@ class BaseProtocol:
             env: Environment for the transport command. None inherits it.
             start_new_session: Isolate the transport from local terminal signals.
             tls: Optional controller certificate and remote trust settings.
+            decode_threshold: Decoded packet bytes above which receive uses a
+                worker, on both endpoints. Default 32 KiB; -1 disables workers.
 
         Returns:
             A connected instance. The caller must still enter its context.
         """
+        cls.check_decode_threshold(decode_threshold)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             python,
@@ -1748,7 +1784,7 @@ class BaseProtocol:
             start_new_session=start_new_session,
         )
         try:
-            instance = await cls.from_subprocess(proc, tls=tls)
+            instance = await cls.from_subprocess(proc, tls=tls, decode_threshold=decode_threshold)
         except BaseException:
             transport = proc._transport  # type: ignore[attr-defined]
             for fd in (0, 1, 2):
@@ -1779,6 +1815,7 @@ class BaseProtocol:
         ssh_options: list[str] | None = None,
         stderr: int = asyncio.subprocess.PIPE,
         tls: TLSConfig | None = None,
+        decode_threshold: int = DECODE_INLINE,
     ) -> Self:
         """Bootstrap a Protocol over SSH.
 
@@ -1805,10 +1842,11 @@ class BaseProtocol:
             cmd += ssh_options
         cmd += [host]
 
-        return await cls.from_command(*cmd, python=python, stderr=stderr, tls=tls)
+        return await cls.from_command(*cmd, python=python, stderr=stderr, tls=tls, decode_threshold=decode_threshold)
 
     @classmethod
-    async def from_stdio(cls, logging_level: int = logging.INFO) -> Self:
+    async def from_stdio(cls, logging_level: int = logging.INFO, *, decode_threshold: int = DECODE_INLINE) -> Self:
+        cls.check_decode_threshold(decode_threshold)
         loop = asyncio.get_running_loop()
 
         # Protect the protocol channel from accidental corruption.
@@ -1867,7 +1905,7 @@ class BaseProtocol:
         finally:
             os.close(report_fd)
 
-        protocol = cls(reader, writer)
+        protocol = cls(reader, writer, decode_threshold=decode_threshold)
         log_handler = RemoteLogHandler(protocol, loop, paused=True)  # type: ignore[arg-type]
         protocol.log_handler = log_handler  # type: ignore[attr-defined]
         root_logger = logging.getLogger()
@@ -1943,8 +1981,14 @@ R = TypeVar("R")
 
 
 class Protocol(BaseProtocol):
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | TLSStream):
-        super().__init__(reader, writer)
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter | TLSStream,
+        *,
+        decode_threshold: int = BaseProtocol.DECODE_INLINE,
+    ):
+        super().__init__(reader, writer, decode_threshold=decode_threshold)
         # The key the peer registered every tool under, by class or module.
         self._tools_cache: dict[type[Tool] | ModuleType, str] = {}
         # Keyed by the name of a bundle root, or by a class that has no bundle.
@@ -2919,12 +2963,13 @@ class RemoteLogHandler(logging.Handler):
 
 async def run(
     *,
+    decode_threshold: int = BaseProtocol.DECODE_INLINE,
     tls_server_hostname: str | None = None,
     tls_ca_data: str | None = None,
     tls_handshake_timeout: float = 10.0,
 ) -> None:
     """remote endpoint entry point, do not call directly"""
-    proto = await Protocol.from_stdio()
+    proto = await Protocol.from_stdio(decode_threshold=decode_threshold)
     if tls_server_hostname is not None:
         try:
             context = ssl.create_default_context(cadata=tls_ca_data)

@@ -65,9 +65,13 @@ def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) ->
     factory = Protocol.from_subprocess
 
     async def from_subprocess(
-        cls: type[Protocol], process: asyncio.subprocess.Process, *, tls: TLSConfig | None = None
+        cls: type[Protocol],
+        process: asyncio.subprocess.Process,
+        *,
+        tls: TLSConfig | None = None,
+        decode_threshold: int = Protocol.DECODE_INLINE,
     ) -> Protocol:
-        return await factory(process, tls=tls if tls is not None else transport_tls)
+        return await factory(process, tls=tls if tls is not None else transport_tls, decode_threshold=decode_threshold)
 
     monkeypatch.setattr(Protocol, "from_subprocess", classmethod(from_subprocess))
 

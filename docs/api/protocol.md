@@ -303,12 +303,24 @@ packet are joined. The bootstrap and the ready boundary travel plain, and the
 boundary opens the codec of each direction.
 
 Small incoming payloads decode on the event loop. Pickle decoding above
-`BaseProtocol.DECODE_INLINE` (32 KiB of decoded bytes) uses the default
-executor. A single frame inflates inline, bounded by `FRAGMENT_SIZE` (64 KiB).
-Fragmented packets decompress and decode off the loop in groups
-of at most `BaseProtocol.DECODE_FRAMES` (16 frames), stopping at the first
-completed packet. The read lock preserves dictionary order and waits for an
-active decoder before propagating cancellation. Stream credits and reassembly
+`decode_threshold` (32 KiB of decoded bytes by default) uses the default
+executor. Pass this keyword to the `Protocol` constructor or its factories,
+or to `Connection.from_local`, `from_command` or `from_ssh`. Factories apply
+the value to both endpoints. Positive integers set the threshold; `-1` keeps
+all receive decoding on the event loop, including fragmented packets. Zero
+and values below `-1` are rejected. For example:
+
+```python
+async with await Protocol.from_command("ssh", "-T", "host", decode_threshold=-1) as remote:
+    ...
+```
+
+A single frame inflates inline, bounded by `FRAGMENT_SIZE` (64 KiB).
+Once decoded fragments of a packet exceed the threshold, subsequent frames
+decompress and decode off the loop in groups of at most
+`BaseProtocol.DECODE_FRAMES` (16 frames), stopping at the first completed
+packet. The read lock preserves dictionary order and waits for an active
+decoder before propagating cancellation. Stream credits and reassembly
 limits still bound buffering.
 
 Packets carrying a `MODULES` source envelope install and unpickle on the event
@@ -317,6 +329,7 @@ hooks in an executor thread; these hooks must not require a running event loop.
 The hand-off costs throughput for large batches in exchange for shorter loop
 pauses. `python -m benchmarks.receive` measures both; use `--burst 38` to replay
 simultaneous bursts at the same average rate, and `--rate 0` for peak throughput.
+Compare `--decode-threshold -1` with the default to measure the tradeoff.
 
 A body whose first `DENSITY_SAMPLE` bytes use more than `DENSITY_LIMIT` byte
 values travels raw and leaves the dictionary untouched, so random and already

@@ -308,3 +308,24 @@ def test_a_call_that_reaches_the_loop_after_a_close_is_refused(transport_tls: TL
                 connection._runtime.run(lambda: connection._invoke(None, Ping.ping, (), {}))
         finally:
             connection._state = "OPEN"
+
+
+@pytest.mark.parametrize("threshold", [-1, 1, 1000000])
+def test_decode_threshold_reaches_remote(transport_tls, threshold):
+    from tests.support.tool_cases.decode import DecodeProbe, DecodeThread
+
+    with Connection.from_local(tls=transport_tls, decode_threshold=threshold) as connection:
+        assert connection._protocol is not None
+        assert connection._protocol.decode_threshold == threshold
+        assert connection(DecodeProbe.inspect) == [threshold]
+        assert connection(DecodeProbe.thread, DecodeThread(), b"x" * 200000) == (threshold != 1)
+
+
+@pytest.mark.parametrize("threshold", [0, -2, True, 1.5])
+def test_invalid_decode_threshold_before_runtime_start(monkeypatch, threshold):
+    def fail(*args, **kwargs):
+        pytest.fail("Invalid threshold must not create a runtime")
+
+    monkeypatch.setattr("rmote.sync._Runtime", fail)
+    with pytest.raises(ValueError, match="decode_threshold"):
+        Connection.from_local(decode_threshold=threshold)
