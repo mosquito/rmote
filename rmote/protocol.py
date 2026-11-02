@@ -383,7 +383,19 @@ class PacketUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
     @classmethod
-    def loads(cls, payload: bytes | memoryview, *, accept_code: bool = False) -> Any:
+    def loads(
+        cls,
+        payload: bytes | memoryview,
+        *,
+        accept_code: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
+    ) -> Any:
+        if pickle_allowlist is not None:
+            allowed = {
+                key: existing_tool_from_dict if value is tool_from_dict and not accept_code else value
+                for key, value in pickle_allowlist.items()
+            }
+            return StrictUnpickler.loads(payload, allowed_globals=allowed)
         return pickle.loads(payload) if accept_code else cls(io.BytesIO(payload)).load()
 
 
@@ -1324,11 +1336,13 @@ class BaseProtocol:
         decode_threshold: int = DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ):
         self.check_decode_threshold(decode_threshold)
         self.decode_threshold = decode_threshold
         self.accept_code = accept_code
         self.accept_calls = accept_calls
+        self.pickle_allowlist = pickle_allowlist
         self.reader = reader
         self.writer = writer
         self.read_lock = asyncio.Lock()
@@ -1468,13 +1482,17 @@ class BaseProtocol:
             if flags & Flags.MODULES:
                 if not self.accept_code:
                     raise PermissionError("Peer module sources are disabled")
-                sources, payload = PacketUnpickler.loads(payload, accept_code=self.accept_code)
+                sources, payload = PacketUnpickler.loads(
+                    payload, accept_code=self.accept_code, pickle_allowlist=self.pickle_allowlist
+                )
                 ModuleLoader.install(sources)
                 self.known_modules.update(sources)
             value = (
-                self.split(payload, accept_code=self.accept_code)
+                self.split(payload, accept_code=self.accept_code, pickle_allowlist=self.pickle_allowlist)
                 if flags & Flags.BATCH
-                else PacketUnpickler.loads(payload, accept_code=self.accept_code)
+                else PacketUnpickler.loads(
+                    payload, accept_code=self.accept_code, pickle_allowlist=self.pickle_allowlist
+                )
             )
         except PermissionError as error:
             return Packet(error, Flags.EXCEPTION | (flags & (Flags.REQUEST | Flags.RESPONSE)), packet_id, size)
@@ -1552,7 +1570,13 @@ class BaseProtocol:
         return b"".join(parts)
 
     @classmethod
-    def split(cls, payload: bytes, *, accept_code: bool = False) -> list[Any]:
+    def split(
+        cls,
+        payload: bytes,
+        *,
+        accept_code: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
+    ) -> list[Any]:
         """Decode the items of one batch payload, in the order they were sent.
 
         Raises:
@@ -1569,7 +1593,11 @@ class BaseProtocol:
             position += cls.ITEM_HEADER.size
             if position + length > len(view):
                 raise ValueError("Truncated item in a stream batch")
-            items.append(PacketUnpickler.loads(view[position : position + length], accept_code=accept_code))
+            items.append(
+                PacketUnpickler.loads(
+                    view[position : position + length], accept_code=accept_code, pickle_allowlist=pickle_allowlist
+                )
+            )
             position += length
         return items
 
@@ -1815,6 +1843,7 @@ class BaseProtocol:
         decode_threshold: int = DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         cls.check_decode_threshold(decode_threshold)
         assert process.stdin is not None, "Process stdin must not be None"
@@ -1835,6 +1864,7 @@ class BaseProtocol:
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
         instance._tls_context = context
         if tls is not None:
@@ -1858,6 +1888,7 @@ class BaseProtocol:
         decode_threshold: int = DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         """Bootstrap a Protocol over any command that starts a remote Python REPL.
 
@@ -1880,6 +1911,8 @@ class BaseProtocol:
                 worker, on both endpoints. Default 32 KiB; -1 disables workers.
             accept_code: Allow this endpoint to load sources from the peer.
             accept_calls: Allow this endpoint to serve calls from the peer.
+            pickle_allowlist: None keeps ordinary pickle decoding. A mapping
+                enables strict decoding and permits these additional globals.
 
         Returns:
             A connected instance. The caller must still enter its context.
@@ -1897,7 +1930,12 @@ class BaseProtocol:
         )
         try:
             instance = await cls.from_subprocess(
-                proc, tls=tls, decode_threshold=decode_threshold, accept_code=accept_code, accept_calls=accept_calls
+                proc,
+                tls=tls,
+                decode_threshold=decode_threshold,
+                accept_code=accept_code,
+                accept_calls=accept_calls,
+                pickle_allowlist=pickle_allowlist,
             )
         except BaseException:
             transport = proc._transport  # type: ignore[attr-defined]
@@ -1932,6 +1970,7 @@ class BaseProtocol:
         decode_threshold: int = DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         """Bootstrap a Protocol over SSH.
 
@@ -1966,6 +2005,7 @@ class BaseProtocol:
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
 
     @classmethod
@@ -1976,6 +2016,7 @@ class BaseProtocol:
         decode_threshold: int = DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         cls.check_decode_threshold(decode_threshold)
         loop = asyncio.get_running_loop()
@@ -2037,7 +2078,12 @@ class BaseProtocol:
             os.close(report_fd)
 
         protocol = cls(
-            reader, writer, decode_threshold=decode_threshold, accept_code=accept_code, accept_calls=accept_calls
+            reader,
+            writer,
+            decode_threshold=decode_threshold,
+            accept_code=accept_code,
+            accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
         log_handler = RemoteLogHandler(protocol, loop, paused=True)  # type: ignore[arg-type]
         protocol.log_handler = log_handler  # type: ignore[attr-defined]
@@ -2118,8 +2164,9 @@ class Protocol(BaseProtocol):
 
     ``accept_code`` and ``accept_calls`` default to False and can be changed
     while connected. Factories apply them to this endpoint only. The remote
-    entry point enables both explicitly. Pickle reducers remain unrestricted;
-    use trusted peers even when both permissions are disabled.
+    entry point enables both explicitly. ``pickle_allowlist=None`` keeps
+    ordinary pickle decoding; a mapping enables strict global permissions.
+    Peer code and additional pickle globals require explicit trust.
     """
 
     def __init__(
@@ -2130,9 +2177,15 @@ class Protocol(BaseProtocol):
         decode_threshold: int = BaseProtocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ):
         super().__init__(
-            reader, writer, decode_threshold=decode_threshold, accept_code=accept_code, accept_calls=accept_calls
+            reader,
+            writer,
+            decode_threshold=decode_threshold,
+            accept_code=accept_code,
+            accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
         # The key the peer registered every tool under, by class or module.
         self._tools_cache: dict[type[Tool] | ModuleType, str] = {}

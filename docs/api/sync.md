@@ -33,6 +33,15 @@ adapters. The same connection API and tool calls apply to each transport.
    .. automethod:: rmote.sync.Connection.__exit__
 ```
 
+## Endpoint permissions and strict decoding
+
+Factories accept `accept_code=False`, `accept_calls=False`, and
+`pickle_allowlist=None` for the local protocol. A mapping enables strict
+receive decoding; `None` keeps ordinary pickle. Additional result classes and
+reducers require explicit permission. See {doc}`protocol` for the allowlist
+format, built-in defaults, callback permissions, and side-effect limitations.
+The Tool call syntax stays the same.
+
 ## Deadlines
 
 All factories accept these keyword-only arguments:

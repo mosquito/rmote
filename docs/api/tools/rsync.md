@@ -15,6 +15,14 @@ reaches Python; rmote supplies the synchronization code.
    :members: upload, download
 ```
 
+## Strict receive decoding
+
+Rsync uses FileSync's `Batch` and `SyncResult`, and its own `Entry` directory
+model in remote calls. An explicit `pickle_allowlist` must permit the types used by that exchange;
+permitting only the local `Result` is insufficient. Some files can already be
+installed when a reply is refused. See {doc}`file_sync` and {doc}`../protocol`
+for the strict decoding contract. The default examples use ordinary decoding.
+
 ## Types
 
 ```{eval-rst}

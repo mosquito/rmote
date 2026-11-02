@@ -3,7 +3,7 @@
 import asyncio
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from functools import partial
 from typing import Any
 
@@ -72,6 +72,7 @@ def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) ->
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Protocol:
         return await factory(
             process,
@@ -79,6 +80,7 @@ def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) ->
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
 
     monkeypatch.setattr(Protocol, "from_subprocess", classmethod(from_subprocess))

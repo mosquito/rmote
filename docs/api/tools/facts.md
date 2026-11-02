@@ -14,6 +14,15 @@ the collectors and their call interface stay the same.
 (`await remote(facts.gather)`) to do the whole collection on the target in one
 call and one answer, or call it directly to collect the local host.
 
+## Strict receive decoding
+
+Facts return dataclass models. A connection with `pickle_allowlist={}` will
+reject these results. Explicitly permit the selected branch's models and any
+nested classes or reconstruction functions after reviewing them. Selecting
+`sections` or `raw=False` does not grant these permissions. The default
+connection examples use ordinary decoding; see {doc}`../protocol` for the
+strict contract.
+
 ## What `available` means
 
 Every branch carries `available`. It reports whether the branch read the kernel

@@ -53,9 +53,12 @@ and, when it must receive tool definitions, `accept_code=True`. The same
 options support an orchestrator on the remote host. See
 {doc}`api/protocol` for refused packets and references to existing Tool classes.
 
-These controls do not provide a pickle sandbox. Both sides still unpickle peer
-data, whose reducers can execute arbitrary code. Use trusted endpoints and
-trusted tool code even with both permissions disabled.
+These controls do not provide a pickle sandbox. By default, both sides still
+unpickle peer data, whose reducers can execute arbitrary code. Set
+`pickle_allowlist={}` on a receiving endpoint for strict decoding with an
+explicit set of permitted globals; additional permissions require review.
+See {doc}`api/protocol` for the contract and limitations. Peer source execution
+still requires trust when `accept_code=True`.
 
 ## Cancellation and Logging
 

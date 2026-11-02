@@ -164,6 +164,13 @@ picklable. Custom types need the same module and class names on both sides.
 Defining a result type in the tool module provides that shared definition.
 An external type requires its defining module on both machines.
 
+With strict decoding (`pickle_allowlist`), explicitly permit the result's
+classes and reconstruction functions, including nested types. Dataclasses and
+already imported classes receive no automatic permission. Review their
+reconstruction hooks before allowing them; see {doc}`api/protocol`. Unknown
+custom exception types are refused in the same way. Ordinary decoding remains
+the default, so the examples above do not need an allowlist.
+
 Return data rather than open files, generators, coroutines, or event loops.
 Use rmote only with trusted peers and tool code: executing transferred code and
 unpickling results can execute Python on the receiving machine.

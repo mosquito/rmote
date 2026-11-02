@@ -82,6 +82,7 @@ class Connection:
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         """Connect through a command that passes stdin and stdout unchanged.
 
@@ -101,7 +102,8 @@ class Connection:
         ``decode_threshold`` sets the receive worker threshold in decoded bytes
         on both endpoints (default 32 KiB). Pass -1 to decode inline throughout.
         ``accept_code`` and ``accept_calls`` apply to the local endpoint only.
-        Both default to False. Pickle results still require a trusted peer.
+        Both default to False. ``pickle_allowlist=None`` keeps ordinary pickle
+        decoding; a mapping enables strict decoding on the local endpoint.
         """
         return cls._connect(
             [*argv, python, "-qui"],
@@ -115,6 +117,7 @@ class Connection:
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
             start_new_session=start_new_session,
         )
 
@@ -133,6 +136,7 @@ class Connection:
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         """Start a local Python interpreter and complete its protocol handshake.
 
@@ -152,6 +156,7 @@ class Connection:
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
 
     @classmethod
@@ -172,6 +177,7 @@ class Connection:
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         """Start SSH and complete the remote Python protocol handshake."""
         cmd = ["ssh", "-T"]
@@ -195,6 +201,7 @@ class Connection:
             decode_threshold=decode_threshold,
             accept_code=accept_code,
             accept_calls=accept_calls,
+            pickle_allowlist=pickle_allowlist,
         )
 
     @classmethod
@@ -213,6 +220,7 @@ class Connection:
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Self:
         Protocol.check_decode_threshold(decode_threshold)
         _check_timeout(connect_timeout, "connect_timeout")
@@ -234,6 +242,7 @@ class Connection:
                     decode_threshold,
                     accept_code,
                     accept_calls,
+                    pickle_allowlist,
                 )
             )
         except BaseException:
@@ -257,6 +266,7 @@ class Connection:
         decode_threshold: int = Protocol.DECODE_INLINE,
         accept_code: bool = False,
         accept_calls: bool = False,
+        pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> None:
         self._loop_thread = threading.current_thread()
         async with asyncio.timeout(timeout):
@@ -282,6 +292,7 @@ class Connection:
                 decode_threshold=decode_threshold,
                 accept_code=accept_code,
                 accept_calls=accept_calls,
+                pickle_allowlist=pickle_allowlist,
             )
             await self._protocol.__aenter__()
 

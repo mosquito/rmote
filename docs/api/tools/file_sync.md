@@ -8,6 +8,14 @@ including SSH, Docker/Kubernetes exec, local Python and prepared byte streams.
    :members: upload, download
 ```
 
+## Strict receive decoding
+
+An empty `pickle_allowlist` cannot complete the exchange. Upload replies need
+explicit permission for `SyncResult`; download replies need `Batch`. Review
+these reconstruction paths before permitting them. A refused upload result
+can arrive after the destination has been installed, so it does not imply
+rollback. See {doc}`../protocol` for strict decoding and failure handling.
+
 ## Types
 
 ```{eval-rst}

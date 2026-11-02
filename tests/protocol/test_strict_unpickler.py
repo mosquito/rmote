@@ -108,3 +108,128 @@ def test_opcode_bytes_inside_data_are_not_instructions():
 def test_trailing_pickle_cannot_be_loaded_after_validation():
     with pytest.raises(PermissionError, match="Trailing"):
         StrictUnpickler(io.BytesIO(pickle.dumps(42) + pickle.dumps(eval)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", [-1, 1], ids=["inline", "worker"])
+@pytest.mark.parametrize("stream", [False, True], ids=["rpc", "stream"])
+async def test_strict_rpc_rejects_reduce_and_keeps_the_connection(tmp_path, transport_tls, threshold, stream):
+    import sys
+
+    from rmote.protocol import Protocol
+    from tests.support.tool_cases.permissions import StrictProbe
+
+    marker = tmp_path / "executed"
+    async with await Protocol.from_command(
+        python=sys.executable, tls=transport_tls, pickle_allowlist={}, decode_threshold=threshold
+    ) as remote:
+        with pytest.raises(PermissionError, match="eval"):
+            if stream:
+                async for _ in remote(StrictProbe.stream, str(marker), b"padding" * 30000):
+                    pytest.fail("An unsafe item must not reach the consumer")
+            else:
+                await remote(StrictProbe.evil, str(marker), b"padding" * 30000)
+        assert not marker.exists()
+        assert await remote(StrictProbe.echo) == 42
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow", [False, True], ids=["denied", "explicit"])
+async def test_explicit_class_permission_is_local(transport_tls, allow):
+    import sys
+    from pathlib import PurePosixPath
+
+    from rmote.protocol import Protocol
+    from tests.support.tool_cases.permissions import StrictProbe
+
+    allowed = {("pathlib", "PurePosixPath"): PurePosixPath} if allow else {}
+    async with await Protocol.from_command(
+        python=sys.executable, tls=transport_tls, pickle_allowlist=allowed
+    ) as remote:
+        if allow:
+            assert await remote(StrictProbe.path) == PurePosixPath("/approved/path")
+        else:
+            with pytest.raises(PermissionError, match="PurePosixPath"):
+                await remote(StrictProbe.path)
+        assert await remote(StrictProbe.echo) == 42
+
+
+def test_allowlist_cannot_enable_official_tool_sources(tmp_path):
+    from rmote.protocol import PacketUnpickler, tool_from_dict
+
+    marker = tmp_path / "executed"
+
+    class Payload:
+        def __reduce__(self):
+            return tool_from_dict, ({"name": "Bad", "source": f"open({str(marker)!r}, 'w').close()"},)
+
+    with pytest.raises(PermissionError, match="Tool sources"):
+        PacketUnpickler.loads(
+            pickle.dumps(Payload()), pickle_allowlist={("rmote.protocol", "tool_from_dict"): tool_from_dict}
+        )
+    assert not marker.exists()
+
+
+def test_sync_factory_enables_strict_decoding(transport_tls, tmp_path):
+    from rmote.sync import Connection
+    from tests.support.tool_cases.permissions import StrictProbe
+
+    marker = tmp_path / "executed"
+    with Connection.from_local(tls=transport_tls, pickle_allowlist={}) as connection:
+        with pytest.raises(PermissionError, match="eval"):
+            connection(StrictProbe.evil, str(marker), b"")
+        assert connection(StrictProbe.echo) == 42
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["packet", "batch", "envelope", "enclosed"])
+@pytest.mark.parametrize("threshold", [-1, 1], ids=["inline", "worker"])
+async def test_every_decode_surface_uses_the_allowlist(tmp_path, surface, threshold):
+    from rmote.protocol import BaseProtocol, Flags
+    from tests.protocol.test_receive_workers import receiver
+
+    marker = tmp_path / "executed"
+
+    class Payload:
+        def __reduce__(self):
+            return eval, (f"open({str(marker)!r}, 'w').close()",)
+
+    payload = pickle.dumps([Payload(), b"padding" * 30000])
+    flags = Flags.RPC | Flags.RESPONSE
+    if surface == "batch":
+        payload = BaseProtocol.batch([payload])
+        flags |= Flags.STREAM | Flags.BATCH
+    elif surface in {"envelope", "enclosed"}:
+        flags |= Flags.MODULES
+        if surface == "enclosed":
+            payload = pickle.dumps(({}, payload))
+    instance = receiver([(payload, flags), (pickle.dumps(42), Flags.RPC)], decode_threshold=threshold)
+    instance.accept_code = True
+    instance.pickle_allowlist = {}
+    packet = await instance.receive()
+    assert packet.flags == Flags.EXCEPTION | Flags.RESPONSE
+    assert isinstance(packet.payload, PermissionError)
+    assert not marker.exists()
+    assert (await instance.receive()).payload == 42
+    assert not instance.fragments.buffers
+
+
+@pytest.mark.asyncio
+async def test_strict_request_returns_permission_error_without_execution(tmp_path):
+    from rmote.protocol import Flags
+    from tests.protocol.test_permissions import connected, ping
+
+    marker = tmp_path / "executed"
+
+    class Payload:
+        def __reduce__(self):
+            return eval, (f"open({str(marker)!r}, 'w').close()",)
+
+    async with connected() as (left, right):
+        left.pickle_allowlist = {}
+        left.accept_calls = True
+        with pytest.raises(PermissionError, match="eval"):
+            await right._call(Payload(), Flags.RPC | Flags.REQUEST)
+        assert not marker.exists()
+        assert await ping(left) == 42
