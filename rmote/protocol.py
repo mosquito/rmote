@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import pickle
+import pickletools
 import ssl
 import struct
 import sys
@@ -30,6 +31,7 @@ from collections.abc import (
     Collection,
     Coroutine,
     Iterable,
+    Mapping,
     Sequence,
 )
 from contextvars import ContextVar, copy_context
@@ -383,6 +385,64 @@ class PacketUnpickler(pickle.Unpickler):
     @classmethod
     def loads(cls, payload: bytes | memoryview, *, accept_code: bool = False) -> Any:
         return pickle.loads(payload) if accept_code else cls(io.BytesIO(payload)).load()
+
+
+class StrictUnpickler(pickle.Unpickler):
+    """Decode one pickle with explicit permission for each global reference.
+
+    Additional globals must be safe to call with hostile arguments, including
+    their object reconstruction hooks. Resource exhaustion is not prevented.
+    """
+
+    SAFE_GLOBALS: ClassVar[Mapping[tuple[str, str], Any]] = MappingProxyType(
+        {
+            ("builtins", "bytearray"): bytearray,
+            ("builtins", "complex"): complex,
+            ("builtins", "frozenset"): frozenset,
+            ("builtins", "range"): range,
+            ("builtins", "set"): set,
+            ("builtins", "slice"): slice,
+            ("builtins", "Exception"): Exception,
+            ("builtins", "RuntimeError"): RuntimeError,
+            ("builtins", "ValueError"): ValueError,
+            ("builtins", "TypeError"): TypeError,
+            ("builtins", "KeyError"): KeyError,
+            ("builtins", "IndexError"): IndexError,
+            ("builtins", "AttributeError"): AttributeError,
+            ("builtins", "OSError"): OSError,
+            ("builtins", "PermissionError"): PermissionError,
+            ("builtins", "FileNotFoundError"): FileNotFoundError,
+            ("builtins", "NotImplementedError"): NotImplementedError,
+            ("builtins", "TimeoutError"): TimeoutError,
+            ("builtins", "ConnectionError"): ConnectionError,
+            ("builtins", "BrokenPipeError"): BrokenPipeError,
+            ("builtins", "EOFError"): EOFError,
+        }
+    )
+
+    def __init__(self, stream: io.BytesIO, *, allowed_globals: Mapping[tuple[str, str], Any] | None = None) -> None:
+        self.allowed_globals = {**self.SAFE_GLOBALS, **(allowed_globals or {})}
+        payload = io.BytesIO(stream.read())
+        for opcode, _, _ in pickletools.genops(payload):
+            # Cached extensions can bypass find_class in the C unpickler.
+            if opcode.name in {"EXT1", "EXT2", "EXT4", "PERSID", "BINPERSID"}:
+                raise PermissionError(f"Pickle opcode {opcode.name} is forbidden")
+        if payload.read(1):
+            raise PermissionError("Trailing pickle data is forbidden")
+        payload.seek(0)
+        super().__init__(payload, fix_imports=False)
+
+    def find_class(self, module: str, name: str) -> Any:
+        try:
+            return self.allowed_globals[module, name]
+        except KeyError:
+            raise PermissionError(f"Pickle global {module}.{name} is forbidden") from None
+
+    @classmethod
+    def loads(
+        cls, payload: bytes | memoryview, *, allowed_globals: Mapping[tuple[str, str], Any] | None = None
+    ) -> Any:
+        return cls(io.BytesIO(payload), allowed_globals=allowed_globals).load()
 
 
 def reduce_tool_class(cls: ToolMeta) -> Any:
