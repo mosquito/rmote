@@ -70,8 +70,16 @@ def docs_tls(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) ->
         *,
         tls: TLSConfig | None = None,
         decode_threshold: int = Protocol.DECODE_INLINE,
+        accept_code: bool = False,
+        accept_calls: bool = False,
     ) -> Protocol:
-        return await factory(process, tls=tls if tls is not None else transport_tls, decode_threshold=decode_threshold)
+        return await factory(
+            process,
+            tls=tls if tls is not None else transport_tls,
+            decode_threshold=decode_threshold,
+            accept_code=accept_code,
+            accept_calls=accept_calls,
+        )
 
     monkeypatch.setattr(Protocol, "from_subprocess", classmethod(from_subprocess))
 

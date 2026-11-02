@@ -17,6 +17,33 @@ Python and prepared streams such as `nc`, including when to use
    :special-members: __call__, __aenter__, __aexit__
 ```
 
+## Endpoint permissions
+
+`Protocol` and all its factories accept `accept_code=False` and
+`accept_calls=False`. These options apply only to the endpoint being created.
+The bootstrapped `run()` entry point explicitly enables both on its endpoint.
+The direction of bootstrap does not determine permissions.
+
+- `accept_code` permits source loading through `SYNC`, `MODULES` envelopes,
+  and Tool reconstruction inside pickle. When disabled, Tool references may
+  resolve only classes in modules already imported in this process, without
+  attached sources. Source envelopes are rejected before unpickling.
+- `accept_calls` permits incoming RPC calls to registered tools. Stream credit
+  and stop messages remain available so outgoing calls can complete.
+
+Both are public, mutable attributes. Changes apply to subsequent packets.
+A refused request gets `PermissionError`; a refused response fails its pending
+call or stream with `PermissionError`. The connection remains usable.
+
+For callbacks, explicitly enable the required permissions on the receiving
+endpoint. For an orchestrator on the remote host, configure each endpoint with
+the same constructor or factory arguments; no separate role is required.
+`Connection` factories accept these options for their local protocol too.
+
+These flags restrict the protocol's source-loading and call paths. They do
+not make pickle safe: other pickle reducers can still execute arbitrary code.
+Both endpoints must remain trusted, even when both permissions are disabled.
+
 ## Tool definitions and commands
 
 Subclass `Tool` in a readable Python module. Import `async_process` from

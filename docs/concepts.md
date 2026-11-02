@@ -40,6 +40,23 @@ generator methods, use `Protocol`: its call and `stream()` return an async
 generator with the method's item type. `Connection` rejects these methods with
 `TypeError` before sending an RPC.
 
+## Endpoint Permissions and Trust
+
+Each `Protocol` endpoint has two mutable attributes: `accept_code` allows code
+from its peer, and `accept_calls` allows incoming tool calls. Both default to
+`False`. Constructors and factories set permissions for the endpoint they
+create; the remote `run()` entry point explicitly enables both. Bootstrap
+direction does not imply a role or grant permissions.
+
+A controller that needs callbacks must explicitly enable `accept_calls=True`
+and, when it must receive tool definitions, `accept_code=True`. The same
+options support an orchestrator on the remote host. See
+{doc}`api/protocol` for refused packets and references to existing Tool classes.
+
+These controls do not provide a pickle sandbox. Both sides still unpickle peer
+data, whose reducers can execute arbitrary code. Use trusted endpoints and
+trusted tool code even with both permissions disabled.
+
 ## Cancellation and Logging
 
 Synchronous RPC deadlines include first Tool upload, packet transmission, and
@@ -208,7 +225,7 @@ on demand. Import `Template` from `rmote.templates`; neither the root package
 nor `rmote.protocol` re-exports it.
 
 Tool definitions carry their declared module dependencies. Object arguments and
-results can carry an outer source manifest with the `MODULES` flag. The receiver
+results can carry an outer source manifest with the `MODULES` flag. A receiver that permits code
 registers these sources before unpickling the enclosed object bytes, allowing
 Python to import their classes normally. This also handles templates nested in
 containers, custom filter reducers and streaming results. Successful transfers
