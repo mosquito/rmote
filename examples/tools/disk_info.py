@@ -1,9 +1,10 @@
 import shutil
 from dataclasses import dataclass
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class DiskSpace:
     total: int

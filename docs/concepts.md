@@ -53,12 +53,13 @@ and, when it must receive tool definitions, `accept_code=True`. The same
 options support an orchestrator on the remote host. See
 {doc}`api/protocol` for refused packets and references to existing Tool classes.
 
-These controls do not provide a pickle sandbox. By default, both sides still
-unpickle peer data, whose reducers can execute arbitrary code. Set
-`pickle_allowlist={}` on a receiving endpoint for strict decoding with an
-explicit set of permitted globals; additional permissions require review.
-See {doc}`api/protocol` for the contract and limitations. Peer source execution
-still requires trust when `accept_code=True`.
+With `accept_code=False`, incoming pickle uses strict global permissions.
+Built-in Tool models are explicitly registered. Application models and custom
+exceptions need local `register` or a connection-specific `pickle_allowlist`;
+imports alone do not grant permission. With `accept_code=True`, the receiver
+uses ordinary pickle because it already permits Python code execution.
+`pickle_allowlist=None` does not opt out of strict decoding on a code-disabled
+endpoint. See {doc}`api/protocol` for the contract and resource limits.
 
 ## Cancellation and Logging
 

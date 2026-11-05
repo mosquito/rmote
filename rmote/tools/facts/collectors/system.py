@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class DistributionInfo:
     id: str | None = None
@@ -18,6 +19,7 @@ class DistributionInfo:
     pretty_name: str | None = None
 
 
+@register
 @dataclass
 class SystemInfo:
     hostname: str

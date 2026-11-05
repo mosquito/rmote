@@ -102,8 +102,10 @@ class Connection:
         ``decode_threshold`` sets the receive worker threshold in decoded bytes
         on both endpoints (default 32 KiB). Pass -1 to decode inline throughout.
         ``accept_code`` and ``accept_calls`` apply to the local endpoint only.
-        Both default to False. ``pickle_allowlist=None`` keeps ordinary pickle
-        decoding; a mapping enables strict decoding on the local endpoint.
+        Both default to False. Code-disabled endpoints use strict pickle
+        decoding. A pickle_allowlist mapping adds local permitted globals;
+        None uses the default permissions. Code-enabled endpoints use ordinary
+        pickle decoding and do not consult the allowlist.
         """
         return cls._connect(
             [*argv, python, "-qui"],

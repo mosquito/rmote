@@ -186,6 +186,7 @@ def test_tool_references_cannot_bring_sources(definition):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accept_code", [True], ids=["trusted-code-peer"])
 async def test_previously_sent_tool_class_can_return(protocol):
     assert await protocol(Ping.echo, Ping) is Ping
 

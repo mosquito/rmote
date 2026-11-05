@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import base64
+import builtins
 import copyreg
 import enum
 import importlib
@@ -16,6 +17,7 @@ import pickle
 import pickletools
 import ssl
 import struct
+import subprocess
 import sys
 import textwrap
 import threading
@@ -38,9 +40,22 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from gzip import compress, decompress
-from pathlib import Path
+from pathlib import Path, PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
 from types import FunctionType, MappingProxyType, ModuleType
 from typing import Any, ClassVar, NotRequired, ParamSpec, Self, TypeAlias, TypedDict, TypeVar, cast, overload
+
+Registered = TypeVar("Registered")
+REGISTERED_GLOBALS: dict[tuple[str, str], Any] = {}
+
+
+def register(value: Registered) -> Registered:
+    """Permit a local pickle global. Its hooks must accept hostile arguments safely."""
+    if not isinstance(value, (type, FunctionType)):
+        raise TypeError("register expects a class or module-level function")
+    if "<locals>" in value.__qualname__:
+        raise ValueError("register requires an importable global")
+    REGISTERED_GLOBALS[value.__module__, value.__qualname__] = value
+    return value
 
 
 class RPCRequest(TypedDict):
@@ -374,29 +389,23 @@ def existing_tool_from_dict(data: dict[str, Any]) -> type[Tool]:
     return cast("type[Tool]", value)
 
 
-class PacketUnpickler(pickle.Unpickler):
-    """Control Tool reconstruction. Other pickle reducers remain unrestricted."""
+class PacketUnpickler:
+    """Select strict or ordinary decoding from the local code permission."""
 
-    def find_class(self, module: str, name: str) -> Any:
-        if module == __name__ and name == "tool_from_dict":
-            return existing_tool_from_dict
-        return super().find_class(module, name)
-
-    @classmethod
+    @staticmethod
     def loads(
-        cls,
         payload: bytes | memoryview,
         *,
         accept_code: bool = False,
         pickle_allowlist: Mapping[tuple[str, str], Any] | None = None,
     ) -> Any:
-        if pickle_allowlist is not None:
-            allowed = {
-                key: existing_tool_from_dict if value is tool_from_dict and not accept_code else value
-                for key, value in pickle_allowlist.items()
-            }
-            return StrictUnpickler.loads(payload, allowed_globals=allowed)
-        return pickle.loads(payload) if accept_code else cls(io.BytesIO(payload)).load()
+        if accept_code:
+            return pickle.loads(payload)
+        allowed = {
+            key: existing_tool_from_dict if value is tool_from_dict else value
+            for key, value in (pickle_allowlist or {}).items()
+        }
+        return StrictUnpickler.loads(payload, allowed_globals=allowed)
 
 
 class StrictUnpickler(pickle.Unpickler):
@@ -414,26 +423,30 @@ class StrictUnpickler(pickle.Unpickler):
             ("builtins", "range"): range,
             ("builtins", "set"): set,
             ("builtins", "slice"): slice,
-            ("builtins", "Exception"): Exception,
-            ("builtins", "RuntimeError"): RuntimeError,
-            ("builtins", "ValueError"): ValueError,
-            ("builtins", "TypeError"): TypeError,
-            ("builtins", "KeyError"): KeyError,
-            ("builtins", "IndexError"): IndexError,
-            ("builtins", "AttributeError"): AttributeError,
-            ("builtins", "OSError"): OSError,
-            ("builtins", "PermissionError"): PermissionError,
-            ("builtins", "FileNotFoundError"): FileNotFoundError,
-            ("builtins", "NotImplementedError"): NotImplementedError,
-            ("builtins", "TimeoutError"): TimeoutError,
-            ("builtins", "ConnectionError"): ConnectionError,
-            ("builtins", "BrokenPipeError"): BrokenPipeError,
-            ("builtins", "EOFError"): EOFError,
+            **{
+                ("builtins", name): value
+                for name, value in vars(builtins).items()
+                if isinstance(value, type) and issubclass(value, Exception)
+            },
+            **{
+                (value.__module__, value.__qualname__): value
+                for value in (
+                    Path,
+                    PosixPath,
+                    WindowsPath,
+                    PurePosixPath,
+                    PureWindowsPath,
+                    subprocess.CompletedProcess,
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                    os.stat_result,
+                )
+            },
         }
     )
 
     def __init__(self, stream: io.BytesIO, *, allowed_globals: Mapping[tuple[str, str], Any] | None = None) -> None:
-        self.allowed_globals = {**self.SAFE_GLOBALS, **(allowed_globals or {})}
+        self.allowed_globals = {**self.SAFE_GLOBALS, **REGISTERED_GLOBALS, **(allowed_globals or {})}
         payload = io.BytesIO(stream.read())
         for opcode, _, _ in pickletools.genops(payload):
             # Cached extensions can bypass find_class in the C unpickler.
@@ -1911,8 +1924,8 @@ class BaseProtocol:
                 worker, on both endpoints. Default 32 KiB; -1 disables workers.
             accept_code: Allow this endpoint to load sources from the peer.
             accept_calls: Allow this endpoint to serve calls from the peer.
-            pickle_allowlist: None keeps ordinary pickle decoding. A mapping
-                enables strict decoding and permits these additional globals.
+            pickle_allowlist: Extra local globals for strict decoding when
+                accept_code is False. None uses the default strict permissions.
 
         Returns:
             A connected instance. The caller must still enter its context.
@@ -2164,8 +2177,9 @@ class Protocol(BaseProtocol):
 
     ``accept_code`` and ``accept_calls`` default to False and can be changed
     while connected. Factories apply them to this endpoint only. The remote
-    entry point enables both explicitly. ``pickle_allowlist=None`` keeps
-    ordinary pickle decoding; a mapping enables strict global permissions.
+    entry point enables both explicitly. Code-disabled endpoints always use
+    strict pickle decoding; a mapping adds permitted globals. Code-enabled
+    endpoints use ordinary pickle decoding, independent of the allowlist.
     Peer code and additional pickle globals require explicit trust.
     """
 

@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from typing import Any, Never, NoReturn, TypeAlias, TypeVar, cast, final, overload
 
+from rmote.protocol import register
+
 __tool_package__ = "rmote.immutable"
 __all__ = ["DeepMappingProxy", "FrozenValue", "freeze"]
 
@@ -218,3 +220,6 @@ def freeze(value: object) -> FrozenValue:
             active.remove(identity)
 
     return visit(value)
+
+
+register(DeepMappingProxy)

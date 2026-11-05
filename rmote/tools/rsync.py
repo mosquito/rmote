@@ -11,12 +11,13 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.tools.file_sync import FileSync
 
 log = logging.getLogger(__name__)
 
 
+@register
 @dataclass(frozen=True)
 class Entry:
     """One directory entry, inspected without following symbolic links."""
@@ -26,6 +27,7 @@ class Entry:
     target: str | None = None
 
 
+@register
 @dataclass
 class Result:
     """Completed directory synchronization, including content and mode changes.

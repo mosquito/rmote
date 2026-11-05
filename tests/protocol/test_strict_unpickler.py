@@ -137,20 +137,20 @@ async def test_strict_rpc_rejects_reduce_and_keeps_the_connection(tmp_path, tran
 @pytest.mark.parametrize("allow", [False, True], ids=["denied", "explicit"])
 async def test_explicit_class_permission_is_local(transport_tls, allow):
     import sys
-    from pathlib import PurePosixPath
+    from decimal import Decimal
 
     from rmote.protocol import Protocol
     from tests.support.tool_cases.permissions import StrictProbe
 
-    allowed = {("pathlib", "PurePosixPath"): PurePosixPath} if allow else {}
+    allowed = {("decimal", "Decimal"): Decimal} if allow else {}
     async with await Protocol.from_command(
         python=sys.executable, tls=transport_tls, pickle_allowlist=allowed
     ) as remote:
         if allow:
-            assert await remote(StrictProbe.path) == PurePosixPath("/approved/path")
+            assert await remote(StrictProbe.decimal) == Decimal("1.25")
         else:
-            with pytest.raises(PermissionError, match="PurePosixPath"):
-                await remote(StrictProbe.path)
+            with pytest.raises(PermissionError, match="Decimal"):
+                await remote(StrictProbe.decimal)
         assert await remote(StrictProbe.echo) == 42
 
 
@@ -205,8 +205,8 @@ async def test_every_decode_surface_uses_the_allowlist(tmp_path, surface, thresh
         if surface == "enclosed":
             payload = pickle.dumps(({}, payload))
     instance = receiver([(payload, flags), (pickle.dumps(42), Flags.RPC)], decode_threshold=threshold)
-    instance.accept_code = True
-    instance.pickle_allowlist = {}
+    instance.accept_code = False
+    instance.pickle_allowlist = None
     packet = await instance.receive()
     assert packet.flags == Flags.EXCEPTION | Flags.RESPONSE
     assert isinstance(packet.payload, PermissionError)
@@ -233,3 +233,36 @@ async def test_strict_request_returns_permission_error_without_execution(tmp_pat
             await right._call(Payload(), Flags.RPC | Flags.REQUEST)
         assert not marker.exists()
         assert await ping(left) == 42
+
+
+def test_code_permission_bypasses_strict_decoder_even_with_allowlist(monkeypatch):
+    from rmote.protocol import PacketUnpickler
+
+    def refused(*args, **kwargs):
+        raise AssertionError("Trusted code receiver must not use StrictUnpickler")
+
+    monkeypatch.setattr(StrictUnpickler, "loads", refused)
+    assert PacketUnpickler.loads(pickle.dumps(42), accept_code=True, pickle_allowlist={}) == 42
+
+
+@pytest.mark.parametrize("allowlist", [None, {}])
+def test_no_code_permission_cannot_disable_strict_decoding(allowlist):
+    from rmote.protocol import PacketUnpickler
+
+    with pytest.raises(PermissionError, match="eval"):
+        PacketUnpickler.loads(pickle.dumps(eval), accept_code=False, pickle_allowlist=allowlist)
+
+
+@pytest.mark.asyncio
+async def test_runtime_code_permission_selects_decoder():
+    from rmote.protocol import Flags
+    from tests.protocol.test_receive_workers import receiver
+
+    payload = pickle.dumps(eval)
+    instance = receiver([(payload, Flags.RPC), (payload, Flags.RPC), (payload, Flags.RPC)])
+    instance.accept_code = False
+    assert isinstance((await instance.receive()).payload, PermissionError)
+    instance.accept_code = True
+    assert (await instance.receive()).payload is eval
+    instance.accept_code = False
+    assert isinstance((await instance.receive()).payload, PermissionError)

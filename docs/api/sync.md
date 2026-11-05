@@ -35,11 +35,13 @@ adapters. The same connection API and tool calls apply to each transport.
 
 ## Endpoint permissions and strict decoding
 
-Factories accept `accept_code=False`, `accept_calls=False`, and
-`pickle_allowlist=None` for the local protocol. A mapping enables strict
-receive decoding; `None` keeps ordinary pickle. Additional result classes and
-reducers require explicit permission. See {doc}`protocol` for the allowlist
-format, built-in defaults, callback permissions, and side-effect limitations.
+Factories accept `accept_code=False`, `accept_calls=False` and an optional
+`pickle_allowlist` for the local endpoint. Code-disabled endpoints always use
+strict decoding. Built-in Tool models are registered; application types use
+local `register` or a connection allowlist. `None` does not disable strict
+decoding. With `accept_code=True`, the endpoint accepts Python code and uses
+ordinary pickle, ignoring the allowlist. The bootstrapped executor enables
+code and calls. See {doc}`protocol` for the contract and compatibility.
 The Tool call syntax stays the same.
 
 ## Deadlines

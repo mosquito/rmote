@@ -3,10 +3,11 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_program
 
 
+@register
 class State(IntEnum):
     STARTED = 0
     STOPPED = 1
@@ -14,6 +15,7 @@ class State(IntEnum):
     RELOADED = 3
 
 
+@register
 @dataclass
 class Result:
     name: str

@@ -93,3 +93,8 @@ def capture_logs():
             logger.removeHandler(handler)
             logger.setLevel(level)
             handler.close()
+
+
+@pytest.fixture
+def accept_code():
+    return False

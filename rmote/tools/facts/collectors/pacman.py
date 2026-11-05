@@ -5,14 +5,16 @@ import shutil
 from dataclasses import dataclass
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class PacmanPackage:
     version: str
 
 
+@register
 @dataclass
 class PacmanInfo:
     available: bool

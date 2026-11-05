@@ -39,3 +39,9 @@ class StrictProbe(Tool):
         from pathlib import PurePosixPath
 
         return PurePosixPath("/approved/path")
+
+    @staticmethod
+    def decimal():
+        from decimal import Decimal
+
+        return Decimal("1.25")

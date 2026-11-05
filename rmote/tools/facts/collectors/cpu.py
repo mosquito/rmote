@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 from . import cgroup, posix
 
@@ -21,6 +21,7 @@ NODE_ROOT = Path("/sys/devices/system/node")
 SIZE_UNITS = {"K": 1024, "M": 1024**2, "G": 1024**3}
 
 
+@register
 @dataclass
 class CpuCache:
     """One cache of the first processor, with the processors that share it."""
@@ -31,6 +32,7 @@ class CpuCache:
     shared_with: str | None
 
 
+@register
 @dataclass
 class CpuTopology:
     """How the online processors are arranged.
@@ -51,6 +53,7 @@ class CpuTopology:
     possible: str | None
 
 
+@register
 @dataclass
 class CpuFrequency:
     """Frequency policy of the first processor, in kilohertz."""
@@ -62,6 +65,7 @@ class CpuFrequency:
     current_mhz: float | None
 
 
+@register
 @dataclass
 class CpuInfo:
     """Processor facts of the target.

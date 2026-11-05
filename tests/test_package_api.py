@@ -15,8 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = """\
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
+@register
 @dataclass
 class Result:
     value: int

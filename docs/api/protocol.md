@@ -40,92 +40,96 @@ endpoint. For an orchestrator on the remote host, configure each endpoint with
 the same constructor or factory arguments; no separate role is required.
 `Connection` factories accept these options for their local protocol too.
 
-These flags restrict the protocol's source-loading and call paths. They do
-not make pickle safe: other pickle reducers can still execute arbitrary code.
-Both endpoints must remain trusted, even when both permissions are disabled.
+`accept_code` also selects the receive decoder. With `False`, every incoming
+pickle uses explicit global permissions. With `True`, the endpoint trusts the
+peer to execute Python and uses ordinary pickle without the strict decoder,
+even when a `pickle_allowlist` is supplied. `accept_calls` remains independent;
+disabling RPC does not revoke the code execution permission.
 
 ## Strict pickle decoding
 
-Pass `pickle_allowlist={}` to a `Protocol` constructor or factory, or to a
-`Connection` factory, to enable `StrictUnpickler` on that endpoint. The default
-`None` keeps ordinary pickle decoding. The option is local; factories do not
-send it to the peer.
+`accept_code=False` is the default for constructors and Python factories.
+It always selects `StrictUnpickler` for incoming packets and stream items.
+`pickle_allowlist=None` uses the default permissions; it does not disable
+strict decoding. The remote bootstrap sets `accept_code=True` and
+`accept_calls=True`, so the executor uses ordinary pickle from its trusted
+controller. Receive policy is local and is not sent to the peer.
 
-The empty mapping permits Python's directly encoded primitive values and
-containers, plus the explicit built-in globals in
-`StrictUnpickler.SAFE_GLOBALS`: `bytearray`, `complex`, `frozenset`, `range`,
-`set`, `slice`, and common built-in exception types. It does not permit an
-arbitrary class merely because its module is imported or it is a dataclass.
-Legacy Python 2 global names are not translated automatically.
+Primitive data, built-in exceptions, paths, subprocess results/errors and the
+explicitly registered built-in Tool models work without user configuration.
+Imports and `@dataclass` alone do not grant permission to other types. Unknown
+globals are rejected without importing their modules. Legacy Python 2 names
+are not translated automatically.
 
-Additional permissions map exact `(module, name)` pairs to local objects.
-For example, explicitly permit the result and error types used by `Exec`:
+### Register application types
+
+Use `register` on a local class or module-level reconstruction function. It
+returns the same object and adds its exact module and qualified name to the
+local allowlist. Register every nested result type and custom exception that
+must cross the connection. Put registration in the module defining the type,
+so importing that module locally installs the permission.
+
+```python
+from dataclasses import dataclass
+from rmote.protocol import register
+
+
+@register
+@dataclass
+class Result:
+    value: int
+```
+
+Registration changes permissions only. It does not change pickle reducers or
+validate object fields. Class reconstruction hooks and registered callables
+must be safe with hostile arguments. For a custom reducer, register a small
+function that validates its arguments. Do not register `eval`, `exec`, generic
+import helpers, Tool source loaders or unrestricted attribute lookup helpers.
+A peer cannot send new permissions to a code-disabled endpoint.
+
+For permissions limited to one connection, pass an exact `(module, name)` to
+local-object mapping through `pickle_allowlist`. It adds to built-in and
+registered permissions and is consulted only when `accept_code=False`.
 
 <!-- name: test_strict_command -->
 ```python
-import subprocess
 import sys
-
 from rmote.sync import Connection
 from rmote.tools import Exec
 
-allowed = {
-    ("subprocess", "CompletedProcess"): subprocess.CompletedProcess,
-    ("subprocess", "CalledProcessError"): subprocess.CalledProcessError,
-}
-with Connection.from_local(pickle_allowlist=allowed) as remote:
+with Connection.from_local() as remote:
     result = remote(Exec.command, sys.executable, "-c", "print('hello')", capture_output=True)
     assert result.stdout == b"hello\n"
 ```
 
-The decoder resolves references from this mapping without importing modules.
-Every added callable must be safe with hostile arguments; classes also need
-safe reconstruction hooks such as `__new__` and `__setstate__`. Prefer small,
-validated reconstruction functions for application models. Do not allow
-`eval`, `exec`, generic import helpers, or whole modules. A remote peer cannot
-supply or extend this list.
+```{eval-rst}
+.. autofunction:: rmote.protocol.register
+```
 
 ### Effect on existing code
 
-Without `pickle_allowlist`, ordinary forward calls and CLI examples keep their
-current behavior. Adding an empty allowlist is not sufficient for every
-built-in tool:
+Built-in tools keep the same call syntax and result types. Application result
+classes and custom exceptions need `@register` or a connection allowlist;
+unregistered subclasses require their own permission. A Tool/filter class or
+compiled Template returned as data can require an executable reconstructor.
+Only receive such results from a trusted code-enabled peer; enabling
+`accept_code=True` also authorizes its other Python code paths.
 
-| Scenario | What strict decoding needs |
-| --- | --- |
-| Text, bytes, numbers, and primitive containers | No extra globals |
-| `Exec.command` and `Exec.shell` | `CompletedProcess` and relevant subprocess exception types |
-| Filesystem stat and other dataclass results | Explicit permission for the result models |
-| Facts | Selected branch models and any nested models or reducers |
-| Streams | Permission for each item type and any non-default exception type |
-| FileSync | `Batch` for download and `SyncResult` for upload replies |
-| Rsync | FileSync types and the `rmote.tools.rsync.Entry` directory model |
-| A Tool class returned as data | An explicitly permitted, safe Tool reconstructor |
+A rejected response does not roll back the operation. Commands and file writes
+can have completed before result decoding fails, and earlier stream items can
+already have been delivered. Check the resulting state before retrying.
 
-A denied response is a decoding failure, not proof that the operation failed.
-The command can have run, or FileSync can have installed the file, before the
-client rejects its result. Earlier stream items can already have reached the
-consumer. Inspect the resulting state before retrying an operation with side
-effects; decoding does not roll it back.
+The strict decoder checks every ordinary packet and every item in a stream
+batch. `MODULES` envelopes are rejected before unpickling when code is disabled.
+Unknown globals, cached extensions (`EXT1`, `EXT2`, `EXT4`), persistent IDs and
+trailing data are refused. A rejected packet fails its pending call or stream;
+the connection remains usable. There is no fallback to ordinary decoding.
+Changing `accept_code` changes the decoder for subsequent packets.
 
-The strict decoder applies to ordinary packets, every item of a stream batch,
-and source envelopes. Unknown globals, extension opcodes (`EXT1`, `EXT2`,
-`EXT4`), persistent IDs, and trailing data are refused with `PermissionError`.
-The opcode pass happens before reconstruction: cached extensions cannot bypass
-`find_class`. Refused packets use the same call and stream error paths as
-endpoint permission failures. There is no fallback to ordinary pickle.
-
-`accept_code` remains independent. With `False`, `MODULES` envelopes and
-Tool sources are still forbidden, even when a Tool reconstructor is in the
-allowlist. With `True`, peer sources remain authorized; strict pickle does not
-revoke that permission.
-
-Strict decoding restricts which reconstruction code can run. It does not bound
-object memory, recursion, or CPU use, and explicit additional globals require
-review. A separate opcode pass costs throughput; use
-`benchmarks.receive` to measure the workload of the application. The sender
-still uses the existing pickler, so unsupported results are detected at the
-receiver.
+The check restricts executable reconstruction code. It does not bound memory,
+recursion or CPU use. The sender keeps its existing pickler. A separate opcode
+pass costs receive throughput; measure the application's payload sizes with
+`benchmarks.receive`. Code-enabled endpoints skip that pass entirely.
 
 ```{eval-rst}
 .. autoclass:: rmote.protocol.StrictUnpickler

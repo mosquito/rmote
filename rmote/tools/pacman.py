@@ -5,16 +5,18 @@ from enum import IntEnum
 from pathlib import Path
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_program
 
 
+@register
 class State(IntEnum):
     PRESENT = 0
     ABSENT = 1
     LATEST = 2
 
 
+@register
 @dataclass
 class Package:
     name: str
@@ -41,6 +43,7 @@ class Package:
         return self.name  # pacman does not support name=version pinning
 
 
+@register
 @dataclass
 class Result:
     name: str

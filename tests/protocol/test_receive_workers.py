@@ -143,6 +143,7 @@ async def test_a_worker_can_import_a_previously_registered_module():
         # first used by a later packet without its own envelope.
         del sys.modules[name]
         instance = receiver([(payload, Flags.RPC)])
+        instance.accept_code = True
         restored = (await instance.receive()).payload
         assert restored.body == value.body
         assert sys.modules[name].loaded_on != threading.get_ident()
@@ -205,7 +206,7 @@ async def test_cancellation_waits_for_the_dictionary_before_releasing_read_lock(
 @pytest.mark.asyncio
 async def test_worker_errors_propagate_and_release_the_read_lock():
     instance = receiver([(b"broken pickle" + b"x" * BaseProtocol.DECODE_INLINE, Flags.RPC)])
-    with pytest.raises(pickle.UnpicklingError):
+    with pytest.raises((pickle.UnpicklingError, ValueError)):
         await instance.receive()
     assert not instance.read_lock.locked()
 

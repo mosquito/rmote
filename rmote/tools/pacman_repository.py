@@ -2,13 +2,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_file
 
 _PACMAN_CONF = Path("/etc/pacman.conf")
 _KEYRINGS_DIR = Path("/etc/pacman.d")
 
 
+@register
 @dataclass
 class Result:
     name: str

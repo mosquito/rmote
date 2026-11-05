@@ -2,13 +2,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_file
 
 _SOURCES_DIR = Path("/etc/apt/sources.list.d")
 _KEYRINGS_DIR = Path("/etc/apt/keyrings")
 
 
+@register
 @dataclass
 class Result:
     name: str

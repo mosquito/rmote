@@ -17,11 +17,9 @@ reaches Python; rmote supplies the synchronization code.
 
 ## Strict receive decoding
 
-Rsync uses FileSync's `Batch` and `SyncResult`, and its own `Entry` directory
-model in remote calls. An explicit `pickle_allowlist` must permit the types used by that exchange;
-permitting only the local `Result` is insufficient. Some files can already be
-installed when a reply is refused. See {doc}`file_sync` and {doc}`../protocol`
-for the strict decoding contract. The default examples use ordinary decoding.
+Rsync and FileSync explicitly register their wire models, so the default
+strict receiver needs no extra configuration. Some files can already be
+installed when a reply is rejected. See {doc}`file_sync` and {doc}`../protocol`.
 
 ## Types
 

@@ -16,12 +16,10 @@ call and one answer, or call it directly to collect the local host.
 
 ## Strict receive decoding
 
-Facts return dataclass models. A connection with `pickle_allowlist={}` will
-reject these results. Explicitly permit the selected branch's models and any
-nested classes or reconstruction functions after reviewing them. Selecting
-`sections` or `raw=False` does not grant these permissions. The default
-connection examples use ordinary decoding; see {doc}`../protocol` for the
-strict contract.
+Built-in branch models are explicitly registered and work with the default
+strict receiver. Custom collectors must register their result classes and
+nested types locally. `sections` and `raw=False` do not grant permissions.
+See {doc}`../protocol` for the contract.
 
 ## What `available` means
 

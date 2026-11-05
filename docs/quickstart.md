@@ -116,11 +116,11 @@ is bytes; `.decode()` converts it to text.
 A failed command raises `subprocess.CalledProcessError` unless you pass
 `check=False`.
 
-The guide uses ordinary pickle decoding. If you enable
-`pickle_allowlist`, explicitly permit `CompletedProcess`, subprocess errors,
-and the result models of the remaining tools. An empty mapping will reject
-this first command's result. See {doc}`api/protocol` for strict decoding and
-why a refused result does not imply that the operation was rolled back.
+The controller uses strict pickle decoding by default. Built-in result and
+exception types are already permitted, so these calls need no extra setup.
+Application models need local `register` or a connection allowlist. See
+{doc}`api/protocol` for the policy and why a rejected result does not roll back
+an operation.
 
 ## Create an Administrator
 
