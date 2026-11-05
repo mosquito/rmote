@@ -164,6 +164,15 @@ picklable. Custom types need the same module and class names on both sides.
 Defining a result type in the tool module provides that shared definition.
 An external type requires its defining module on both machines.
 
+Code-disabled endpoints strictly decode pickle by default. Add `@register`
+above `@dataclass` for each application result class, including nested types,
+and register custom exceptions. `register` comes from `rmote.protocol` and
+adds an explicit local permission; imports and dataclasses alone grant none.
+A connection-specific `pickle_allowlist` is another option. Review all
+reconstruction hooks before granting permission; see {doc}`api/protocol`.
+Code-enabled receivers use ordinary pickle because the peer already has
+permission to execute Python.
+
 Return data rather than open files, generators, coroutines, or event loops.
 Use rmote only with trusted peers and tool code: executing transferred code and
 unpickling results can execute Python on the receiving machine.

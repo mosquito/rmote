@@ -40,6 +40,27 @@ generator methods, use `Protocol`: its call and `stream()` return an async
 generator with the method's item type. `Connection` rejects these methods with
 `TypeError` before sending an RPC.
 
+## Endpoint Permissions and Trust
+
+Each `Protocol` endpoint has two mutable attributes: `accept_code` allows code
+from its peer, and `accept_calls` allows incoming tool calls. Both default to
+`False`. Constructors and factories set permissions for the endpoint they
+create; the remote `run()` entry point explicitly enables both. Bootstrap
+direction does not imply a role or grant permissions.
+
+A controller that needs callbacks must explicitly enable `accept_calls=True`
+and, when it must receive tool definitions, `accept_code=True`. The same
+options support an orchestrator on the remote host. See
+{doc}`api/protocol` for refused packets and references to existing Tool classes.
+
+With `accept_code=False`, incoming pickle uses strict global permissions.
+Built-in Tool models are explicitly registered. Application models and custom
+exceptions need local `register` or a connection-specific `pickle_allowlist`;
+imports alone do not grant permission. With `accept_code=True`, the receiver
+uses ordinary pickle because it already permits Python code execution.
+`pickle_allowlist=None` does not opt out of strict decoding on a code-disabled
+endpoint. See {doc}`api/protocol` for the contract and resource limits.
+
 ## Cancellation and Logging
 
 Synchronous RPC deadlines include first Tool upload, packet transmission, and
@@ -208,7 +229,7 @@ on demand. Import `Template` from `rmote.templates`; neither the root package
 nor `rmote.protocol` re-exports it.
 
 Tool definitions carry their declared module dependencies. Object arguments and
-results can carry an outer source manifest with the `MODULES` flag. The receiver
+results can carry an outer source manifest with the `MODULES` flag. A receiver that permits code
 registers these sources before unpickling the enclosed object bytes, allowing
 Python to import their classes normally. This also handles templates nested in
 containers, custom filter reducers and streaming results. Successful transfers

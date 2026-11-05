@@ -8,6 +8,12 @@ including SSH, Docker/Kubernetes exec, local Python and prepared byte streams.
    :members: upload, download
 ```
 
+## Strict receive decoding
+
+Built-in `Batch`, `Planned` and `SyncResult` models are explicitly registered,
+so default strict receivers need no extra configuration. A rejected reply does
+not roll back an installed file. See {doc}`../protocol` for permissions.
+
 ## Types
 
 ```{eval-rst}

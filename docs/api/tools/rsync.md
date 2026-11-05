@@ -15,6 +15,12 @@ reaches Python; rmote supplies the synchronization code.
    :members: upload, download
 ```
 
+## Strict receive decoding
+
+Rsync and FileSync explicitly register their wire models, so the default
+strict receiver needs no extra configuration. Some files can already be
+installed when a reply is rejected. See {doc}`file_sync` and {doc}`../protocol`.
+
 ## Types
 
 ```{eval-rst}

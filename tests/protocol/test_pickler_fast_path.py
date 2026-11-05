@@ -22,18 +22,22 @@ def package(tmp_path, monkeypatch):
     root = tmp_path / "subclass_probe"
     root.mkdir()
     (root / "__init__.py").write_text("""__tool_package__ = "subclass_probe"
+from rmote.protocol import register
 
 
+@register
 class Settings(dict):
     def names(self):
         return sorted(self)
 
 
+@register
 class Names(list):
     def joined(self):
         return ",".join(self)
 
 
+@register
 class Plain:
     def __init__(self, value=1):
         self.value = value

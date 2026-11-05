@@ -5,9 +5,10 @@ import shutil
 from dataclasses import dataclass
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class AptPackage:
     version: str
@@ -15,6 +16,7 @@ class AptPackage:
     status: str
 
 
+@register
 @dataclass
 class AptInfo:
     available: bool

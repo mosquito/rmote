@@ -4,9 +4,10 @@ import platform
 import sys
 from dataclasses import dataclass
 
-from rmote.protocol import Tool, inline
+from rmote.protocol import Tool, inline, register
 
 
+@register
 @dataclass
 class PythonInfo:
     version: str

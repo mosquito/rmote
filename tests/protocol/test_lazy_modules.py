@@ -75,6 +75,7 @@ async def test_inline_process_dependency_is_loaded_on_demand(lazy_probe, isolate
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["function", "class", "stream"])
+@pytest.mark.parametrize("accept_code", [True], ids=["trusted-code-peer"])
 async def test_template_argument_carries_code_once_before_pickle(lazy_probe, isolated_remote, monkeypatch, kind):
     assert await isolated_remote(lazy_probe.modules) == []
     sent = []
@@ -103,6 +104,7 @@ async def test_template_argument_carries_code_once_before_pickle(lazy_probe, iso
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accept_code", [True], ids=["trusted-code-peer"])
 async def test_concurrent_first_template_arguments(lazy_probe, isolated_remote):
     results = await asyncio.gather(*(isolated_remote(lazy_probe.echo, Template(str(i))) for i in range(8)))
     assert [item.render() for item in results] == [str(i) for i in range(8)]
@@ -125,6 +127,7 @@ def render(value):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accept_code", [True], ids=["trusted-code-peer"])
 async def test_tool_class_roundtrip_uses_transferred_source(lazy_probe, isolated_remote):
     returned = await isolated_remote(lazy_probe.source_roundtrip, lazy_probe.Echo)
     assert returned is lazy_probe.Echo

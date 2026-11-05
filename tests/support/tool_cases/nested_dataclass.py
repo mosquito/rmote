@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
 class GeometryTool(Tool):
@@ -10,6 +10,7 @@ class GeometryTool(Tool):
         MM = 1
         INCH = 2
 
+    @register
     @dataclass
     class Point:
         x: float

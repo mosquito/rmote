@@ -14,6 +14,13 @@ the collectors and their call interface stay the same.
 (`await remote(facts.gather)`) to do the whole collection on the target in one
 call and one answer, or call it directly to collect the local host.
 
+## Strict receive decoding
+
+Built-in branch models are explicitly registered and work with the default
+strict receiver. Custom collectors must register their result classes and
+nested types locally. `sections` and `raw=False` do not grant permissions.
+See {doc}`../protocol` for the contract.
+
 ## What `available` means
 
 Every branch carries `available`. It reports whether the branch read the kernel

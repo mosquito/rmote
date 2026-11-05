@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any, BinaryIO, ClassVar
 from uuid import uuid4
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass(frozen=True)
 class SyncResult:
     """Summary of a completed file synchronization.
@@ -41,6 +42,7 @@ class SyncResult:
     reused: int
 
 
+@register
 @dataclass(frozen=True)
 class Batch:
     """One message of a sender: new signatures, requested content, final hash.
@@ -59,6 +61,7 @@ class Batch:
     digest: bytes | None = None
 
 
+@register
 @dataclass(frozen=True)
 class Planned:
     """One planned block of a receiver, in block order.

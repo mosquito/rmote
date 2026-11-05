@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 from . import cgroup, posix
 
 MEMINFO = Path("/proc/meminfo")
 
 
+@register
 @dataclass
 class SwapMemory:
     """Swap totals, in bytes."""
@@ -28,6 +29,7 @@ class SwapMemory:
     cached_bytes: int | None
 
 
+@register
 @dataclass
 class HugePages:
     """Huge page pool of the default size."""
@@ -38,6 +40,7 @@ class HugePages:
     reserved: int | None
 
 
+@register
 @dataclass
 class MemoryInfo:
     """Memory facts of the target, in bytes.

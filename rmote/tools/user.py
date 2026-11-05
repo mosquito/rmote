@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_program
 
 
+@register
 @dataclass
 class Result:
     name: str
@@ -18,6 +19,7 @@ class Result:
     changed: bool
 
 
+@register
 @dataclass
 class GroupResult:
     name: str

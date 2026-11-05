@@ -8,16 +8,18 @@ from types import MappingProxyType
 from typing import ClassVar
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_program
 
 
+@register
 class State(IntEnum):
     PRESENT = 0
     ABSENT = 1
     LATEST = 2
 
 
+@register
 @dataclass
 class Package:
     name: str
@@ -44,6 +46,7 @@ class Package:
         return f"{self.name}={self.version}" if self.version else self.name
 
 
+@register
 @dataclass
 class Result:
     name: str

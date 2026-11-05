@@ -36,6 +36,8 @@ def lazy():
 """)
     (root / "models.py").write_text("""from __future__ import annotations
 from dataclasses import dataclass
+from rmote.protocol import register
+@register
 @dataclass
 class Record:
     value: int
@@ -167,8 +169,9 @@ async def test_failed_root_import_can_retry(package, isolated_remote):
 @pytest.mark.asyncio
 async def test_tool_class_argument_and_module_share_one_definition(tmp_path, monkeypatch, isolated_remote):
     (tmp_path / "class_module_probe.py").write_text("""from dataclasses import dataclass
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
+@register
 @dataclass
 class Record:
     value: int

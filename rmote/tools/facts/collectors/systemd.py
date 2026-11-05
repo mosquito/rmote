@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class SystemdInfo:
     available: bool
@@ -22,6 +23,7 @@ class SystemdInfo:
     unit_files: dict[str, dict[str, Any]] | None = None
 
 
+@register
 @dataclass
 class TimesyncInfo:
     available: bool
@@ -31,6 +33,7 @@ class TimesyncInfo:
     timesync: dict[str, str] | None = None
 
 
+@register
 @dataclass
 class ResolvedInfo:
     available: bool

@@ -15,7 +15,7 @@ from rmote.protocol import Protocol, TLSConfig, TLSStream
 
 @asynccontextmanager
 async def subprocess_protocol(
-    *command: str, cwd: Path | None = None, tls: TLSConfig | None = None
+    *command: str, cwd: Path | None = None, tls: TLSConfig | None = None, accept_code: bool = False
 ) -> AsyncGenerator[Protocol, None]:
     """Always reap the peer, including failed setup and exceptions in tests."""
     process = await asyncio.create_subprocess_exec(
@@ -26,7 +26,7 @@ async def subprocess_protocol(
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        proto = await Protocol.from_subprocess(process, tls=tls)
+        proto = await Protocol.from_subprocess(process, tls=tls, accept_code=accept_code)
         async with proto:
             assert isinstance(proto.writer, TLSStream) is (tls is not None)
             yield proto
@@ -40,8 +40,8 @@ async def subprocess_protocol(
 
 
 @pytest_asyncio.fixture
-async def protocol(transport_tls: TLSConfig | None):
-    async with subprocess_protocol(sys.executable, "-qui", tls=transport_tls) as remote:
+async def protocol(transport_tls: TLSConfig | None, accept_code):
+    async with subprocess_protocol(sys.executable, "-qui", tls=transport_tls, accept_code=accept_code) as remote:
         yield remote
 
 

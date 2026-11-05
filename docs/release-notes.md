@@ -1,5 +1,16 @@
 # Release notes
 
+## 0.8.0
+
+- Incoming code and calls now require local `accept_code=True` and
+  `accept_calls=True`. Both default to `False`; the bootstrapped executor
+  enables both for its trusted controller.
+- **Breaking:** code-disabled endpoints always strictly decode pickle.
+  Register application result classes, custom exceptions and reconstruction
+  functions with `rmote.protocol.register`, or add a local `pickle_allowlist`.
+  Built-in Tool models are already registered. `None` does not disable strict
+  decoding. Code-enabled endpoints use ordinary pickle and ignore the allowlist.
+
 ## 0.7.1
 
 - Free-threaded CPython is supported on both sides; CI covers 3.13t and 3.14t

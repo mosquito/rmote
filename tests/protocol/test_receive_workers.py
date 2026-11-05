@@ -8,7 +8,15 @@ from typing import Any, cast
 
 import pytest
 
-from rmote.protocol import BaseProtocol, Flags, FrameCompressor, FrameDecompressor, ModuleLoader, ModuleSource
+from rmote.protocol import (
+    BaseProtocol,
+    Flags,
+    FrameCompressor,
+    FrameDecompressor,
+    ModuleLoader,
+    ModuleSource,
+    PacketUnpickler,
+)
 
 
 def receiver(
@@ -52,13 +60,13 @@ async def test_large_payloads_decode_in_workers_in_wire_order(monkeypatch, compr
     # Distinct strings keep the ordinary pickle large as well as the batch.
     instance.decode_threshold = 1024
     decoded_on: list[int] = []
-    original = pickle.loads
+    original = PacketUnpickler.loads
 
-    def loads(payload):
+    def loads(payload, **kwargs):
         decoded_on.append(threading.get_ident())
-        return original(payload)
+        return original(payload, **kwargs)
 
-    monkeypatch.setattr(pickle, "loads", loads)
+    monkeypatch.setattr(PacketUnpickler, "loads", loads)
     packets = await asyncio.gather(instance.receive(), instance.receive())
     assert [packet.payload for packet in packets] == values
     assert [packet.packet_id for packet in packets] == [0, 1]
@@ -112,6 +120,7 @@ async def test_large_module_envelope_stays_on_the_loop(size):
     # The source envelope must not change that first-load contract.
     body = pickle.dumps([Loop(), b"x" * size])
     instance = receiver([(pickle.dumps(({}, body)), Flags.MODULES)])
+    instance.accept_code = True
     result = (await instance.receive()).payload
     assert result == [asyncio.get_running_loop(), b"x" * size]
 
@@ -134,6 +143,7 @@ async def test_a_worker_can_import_a_previously_registered_module():
         # first used by a later packet without its own envelope.
         del sys.modules[name]
         instance = receiver([(payload, Flags.RPC)])
+        instance.accept_code = True
         restored = (await instance.receive()).payload
         assert restored.body == value.body
         assert sys.modules[name].loaded_on != threading.get_ident()
@@ -196,7 +206,7 @@ async def test_cancellation_waits_for_the_dictionary_before_releasing_read_lock(
 @pytest.mark.asyncio
 async def test_worker_errors_propagate_and_release_the_read_lock():
     instance = receiver([(b"broken pickle" + b"x" * BaseProtocol.DECODE_INLINE, Flags.RPC)])
-    with pytest.raises(pickle.UnpicklingError):
+    with pytest.raises((pickle.UnpicklingError, ValueError)):
         await instance.receive()
     assert not instance.read_lock.locked()
 

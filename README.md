@@ -110,7 +110,12 @@ you can define your own `Tool` in the console. See the
 - [Execution model](https://docs.rmote.org/concepts.html): code transfer, state, concurrency, and cancellation.
 
 Use rmote only with trusted hosts and tool code. It transfers executable Python
-and uses pickle for results. A timeout stops local waiting; it does not cancel
+and uses pickle for results. Code-disabled endpoints strictly decode incoming
+pickle; application result types need local `register` or an explicit allowlist.
+Built-in Tool models work without extra configuration. Code-enabled endpoints
+use ordinary pickle because the peer already has permission to execute Python.
+See [Endpoint permissions and strict decoding](https://docs.rmote.org/api/protocol.html).
+A timeout stops local waiting; it does not cancel
 an operation already running on the target.
 
 ## Development

@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 from rmote.requires import needs_linux
 
 
+@register
 @dataclass
 class Result:
     key: str

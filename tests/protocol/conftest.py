@@ -21,6 +21,8 @@ async def client():
 
 
 @pytest_asyncio.fixture
-async def isolated_remote(tmp_path, transport_tls: TLSConfig | None):
-    async with subprocess_protocol(sys.executable, "-I", "-S", "-qui", cwd=tmp_path, tls=transport_tls) as remote:
+async def isolated_remote(tmp_path, transport_tls: TLSConfig | None, accept_code):
+    async with subprocess_protocol(
+        sys.executable, "-I", "-S", "-qui", cwd=tmp_path, tls=transport_tls, accept_code=accept_code
+    ) as remote:
         yield remote

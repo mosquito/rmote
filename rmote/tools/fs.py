@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass(frozen=True, slots=True)
 class StatResult:
     path: str

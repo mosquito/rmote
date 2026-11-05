@@ -5,20 +5,23 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class CounterInfo:
     calls: int
 
 
+@register
 @dataclass
 class OverlapInfo:
     maximum: int
     pid: int
 
 
+@register
 @dataclass
 class Payload:
     values: dict[str, Any]

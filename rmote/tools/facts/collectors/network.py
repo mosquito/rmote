@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from rmote.process import async_process
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 
+@register
 @dataclass
 class NetworkInterface:
     ifindex: int
@@ -23,6 +24,7 @@ class NetworkInterface:
     speed_bps: int | None
 
 
+@register
 @dataclass
 class NetworkAddress:
     interface: str
@@ -31,6 +33,7 @@ class NetworkAddress:
     prefixlen: int
 
 
+@register
 @dataclass
 class NetworkNextHop:
     interface: str | None
@@ -39,6 +42,7 @@ class NetworkNextHop:
     weight: int | None
 
 
+@register
 @dataclass
 class NetworkRoute:
     destination: str
@@ -49,12 +53,14 @@ class NetworkRoute:
     nexthops: list[NetworkNextHop]
 
 
+@register
 @dataclass
 class NetworkFamily:
     addresses: list[NetworkAddress] | None = None
     routes: list[NetworkRoute] | None = None
 
 
+@register
 @dataclass
 class DNSServer:
     address: str
@@ -62,6 +68,7 @@ class DNSServer:
     ifindex: int | None
 
 
+@register
 @dataclass
 class DefaultRoute:
     interface: str
@@ -72,12 +79,14 @@ class DefaultRoute:
     metric: int
 
 
+@register
 @dataclass
 class NetworkDefaults:
     ipv4: DefaultRoute | None = None
     ipv6: DefaultRoute | None = None
 
 
+@register
 @dataclass
 class NetworkInfo:
     available: bool = False
@@ -89,6 +98,7 @@ class NetworkInfo:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@register
 @dataclass
 class NetworkdInfo:
     available: bool = False

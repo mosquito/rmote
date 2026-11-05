@@ -23,6 +23,7 @@ async def test_filters_over_rpc(protocol: Protocol):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accept_code", [True], ids=["trusted-code-peer"])
 async def test_custom_filters_transferred_to_remote(protocol: Protocol):
     from rmote.protocol import Tool
 
@@ -70,7 +71,7 @@ async def test_template_with_filters_in_isolated_remote(transport_tls: TLSConfig
         cwd=tmp_path,
     )
     try:
-        async with await Protocol.from_subprocess(proc, tls=transport_tls) as remote:
+        async with await Protocol.from_subprocess(proc, tls=transport_tls, accept_code=True) as remote:
             assert await remote(FilterTemplateTool.package_info) == (
                 "rmote.templates",
                 "rmote.templates",

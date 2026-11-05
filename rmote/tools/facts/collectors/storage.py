@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 # Filesystems that hold no stored data and report no meaningful space. They
 # stay in the result with ``pseudo`` set, so a caller keeps the full picture
@@ -47,6 +47,7 @@ PSEUDO_FILESYSTEMS = frozenset(
 SYSFS_SECTOR = 512
 
 
+@register
 @dataclass
 class FilesystemUsage:
     """Space and inodes of one mounted filesystem, in bytes and counts.
@@ -64,6 +65,7 @@ class FilesystemUsage:
     available_inodes: int | None
 
 
+@register
 @dataclass
 class MountPoint:
     """One mounted filesystem, as the kernel lists it.
@@ -86,6 +88,7 @@ class MountPoint:
     usage: FilesystemUsage | None
 
 
+@register
 @dataclass
 class BlockDevice:
     """One whole block device from sysfs, with the sizes of its partitions."""
@@ -99,6 +102,7 @@ class BlockDevice:
     partitions: dict[str, int | None]
 
 
+@register
 @dataclass
 class SwapArea:
     """One active swap area. Sizes come from /proc/swaps, in bytes."""
@@ -110,6 +114,7 @@ class SwapArea:
     priority: int
 
 
+@register
 @dataclass
 class StorageInfo:
     """Storage of the target: mounts with their space, devices and swap.

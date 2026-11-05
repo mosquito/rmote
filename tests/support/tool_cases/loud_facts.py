@@ -3,11 +3,12 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from rmote.protocol import Tool
+from rmote.protocol import Tool, register
 
 LINES = 2000
 
 
+@register
 @dataclass
 class LoudInfo:
     available: bool
